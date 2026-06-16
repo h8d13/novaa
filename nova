@@ -1,8 +1,11 @@
-#!/usr/bin/env lua
+#!/usr/bin/env lua5.4
 -- Nova runner: parse a .nova file, lower it to pseudo-IR, execute it.
 -- Usage: ./nova <file.nova> [--entry name] [int args...]
 --   --entry  function to call (default: main)
 --   int args are passed to that function
+--
+-- Runs under lua5.4 to match the luarocks rock tree (C rocks like cjson are
+-- built per Lua version); pure-Nova programs run under any 5.3+ interpreter.
 
 local here = arg[0]:match("^(.*)/[^/]*$") or "."
 package.path = here .. "/lang/?.lua;" .. here .. "/codegen/?.lua;"
