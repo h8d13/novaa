@@ -188,6 +188,32 @@ Parser = Object:new()
     return {type="call", name=name, args=args}
   end
 
+  -- Lookahead: is this Ident-led statement a declaration (`T name` /
+  -- `T[N] name`) rather than an expression (`arr[i] = x`, `x = 5`)?
+  -- Both forms start `Ident [ ... ]`; the closing `]` is followed by the
+  -- variable name in a decl, by an operator in an lvalue index.
+  function Parser:looks_like_decl()
+    local save = self.tokens.i
+    self:next() -- the leading type identifier
+    local result = false
+    local t1 = self:peek()
+    if t1.type == TokenType.Ident then
+      result = true -- `T name`
+    elseif t1.value == "[" then
+      self:next()
+      local depth = 1
+      while depth > 0 do
+        local t = self:next()
+        if t.type == TokenType.EOF then break end
+        if t.value == "[" then depth = depth + 1
+        elseif t.value == "]" then depth = depth - 1 end
+      end
+      result = self:peek().type == TokenType.Ident -- `T[N] name`
+    end
+    self.tokens.i = save
+    return result
+  end
+
   function Parser:parse_statement()
     local tok = self:peek()
 
@@ -205,8 +231,7 @@ Parser = Object:new()
       self:next()
       return {type="return", value=self:parse_expression()}
     elseif tok.type == TokenType.Ident then
-      local next_tok = self:peek()
-      if next_tok and next_tok.type == TokenType.Ident then
+      if self:looks_like_decl() then
         return self:parse_declaration()
       end
     end

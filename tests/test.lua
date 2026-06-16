@@ -35,7 +35,7 @@ local code = [[
 local parser = Parser:new(code)
 local ast = parser:parse()
 
-require("inspect")
+require("tests/inspect")
 print(inspect(ast))
 
 local Codegen = require("codegen/codegen")
@@ -44,3 +44,13 @@ codegen = Codegen:new()
 insns = codegen:generate(ast.body)
 
 print(inspect(insns))
+
+-- Array subscript: rvalue indexing (multidim, call-in-index) and the
+-- index-as-lvalue assignment that parse_statement lookahead now allows.
+local arrays = [[
+  int a = m[i][j];
+  int b = arr[f(x)];
+  arr[i] = 5;
+]]
+
+print(inspect(Parser:new(arrays):parse()))
