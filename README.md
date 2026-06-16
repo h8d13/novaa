@@ -2,23 +2,24 @@
 
 In a world where new hyped language compilers and runtime std libraries are implemented in 4GB of sources, it's time for a reset.
 
-At the foundation is Nýr, a portable micro-IR (µIR) designed for efficient and flexible code generation across RISC and CISC CPU ISAs. Built on top of Nýr is Nova, a new minimal high-level language that embraces modern programming principles. Together, Nýr and Nova represent a bold step toward a leaner, more elegant future in software development.
+At the foundation is Nýr, a portable micro-IR (µIR) designed for efficient and flexible code generation. Built on top of Nýr is Nova, a new minimal high-level language that embraces modern programming principles. Together, Nýr and Nova represent a bold step toward a leaner, more elegant future in software development.
 Nava isn't just a language it's a philosophy: that the complexity of modern systems is not a necessity but a choice. Nava chooses minimalism, portability and readability.
 
 # 🛰️ Nova Language Syntax Sheet
 
-Nova is a modern simplified C++ with a touch of Lua, designed for clarity and modern expression. It uses `fn` for function declarations, first class multiple return times and omits parentheses for conditional statements, and optional curly braces for single expression functions, too.
+Nova is a modern simplified C++ built on Lua, designed for clarity and modern expression. It uses `fn` for function declarations, first class multiple return times and omits parentheses for conditional statements, and optional curly braces for single expression functions, too.
 
 ---
 
 ## 📃 Comments
 
 ```nova
-// Single-line comment
+-- Singe
+// line comment
 
-/* 
+/*
   Multi-line
-  comment 
+  comment
 */
 ```
 
@@ -28,9 +29,9 @@ Nova is a modern simplified C++ with a touch of Lua, designed for clarity and mo
 
 ```
 fn       if       else     for      return
-break    continue class    enum
-typeof   sizeof   switch   case
-template
+break    continue switch   case     default
+enum     typedef  struct
+try      catch    except   throw
 ```
 
 ---
@@ -155,7 +156,61 @@ switch color {
     print("Stop")
   case Green:
     print("Go")
-  default: 
+  default:
     print("Wait")
 }
 ```
+
+---
+
+## ⚠️ Exceptions
+
+Nova supports basic exception handling using `throw` and `catch` (also
+spelled `try`/`except`).
+
+### Throwing an Exception
+
+```nova
+fn risky()
+  throw "Something went wrong"
+```
+
+### Catching Exceptions
+
+```nova
+fn main() {
+  try
+    risky()
+  catch err
+    print("Error was: " + err)
+}
+```
+
+## 📦 Modules
+
+`import <module>` exposes a host module's functions to Nova as
+`module.fn(...)`. A stdlib table works out of the box:
+
+```nova
+import math
+
+fn int hypot(int a, int b) {
+  return math.sqrt(a * a + b * b)
+}
+```
+
+A `luarocks` package is no different -- install it, then `import` it. The
+runner adds the user rock tree to Lua's search path, so no environment
+setup is needed (run under the Lua version the rock was built for):
+
+```nova
+import cjson
+
+fn str roundtrip() {
+  return cjson.encode(cjson.decode("[10, 20, 30]"))
+}
+```
+
+Under the hood `import` is Lua's `require`, the same mechanism the compiler
+itself is assembled from. A minimal language earns its minimalism by not
+rebuilding what the host already does well.

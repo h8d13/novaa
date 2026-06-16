@@ -1,5 +1,7 @@
 // Nova: a small tour. See README.md for the full syntax sheet.
 
+import math // exposes math.sqrt etc. (a luarocks package imports the same)
+
 typedef int myint;
 
 struct Vec3 {
@@ -80,9 +82,61 @@ fn float circle(int r) {
   return pi * r * r
 }
 
+// imported host functions: math.sqrt comes from `import math` above.
+// a luarocks package is reached the same way (import it, call module.fn)
+fn int hyp(int a, int b) {
+  return math.sqrt(a * a + b * b)
+}
+
+// break and continue control the loop: sum odd numbers below n, stop at 7
+fn int oddsum(int n) {
+  int s = 0;
+  for int i = 0; i < n; ++i {
+    if i % 2 == 0 { continue; }
+    if i > 7 { break; }
+    s += i;
+  }
+  return s
+}
+
+// throw raises a value; try/catch binds it. catches a Nova throw and an
+// error from a called function alike
+fn int checked(int x) {
+  if x < 0 { throw 99; }
+  return x
+}
+
+fn int safe(int x) {
+  int r = 0;
+  try {
+    r = checked(x);
+  } catch e {
+    r = e;
+  }
+  return r
+}
+
+// prints a message, then throws an int; the catch recovers it
+fn int risky() {
+  print("something went wrong");
+  throw 7
+}
+
+fn int recover() {
+  int code = 0;
+  try {
+    risky();
+  } catch e {
+    print("error was: " + e); // string + value concatenates
+    code = e;
+  }
+  return code
+}
+
 // entry point; `./nova hello.nova` runs this and prints its result
 fn int main() {
   int q, r = divmod(17, 5); // destructures both results: q=3, r=2
   return sum(5) + abs(id(-3)) + sign(-42)
-       + max(3, 9) + oddbit(5) + grade(2) + q + r + circle(2)
+       + max(3, 9) + oddbit(5) + grade(2) + q + r + circle(2) + hyp(3, 4)
+       + oddsum(20) + safe(-5)
 }

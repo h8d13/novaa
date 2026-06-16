@@ -9,6 +9,8 @@ function Codegen.new()
     regCount = 0,
     env = {},     -- varName -> register
     consts = {},  -- enum variant -> integer value (global)
+    strings = {}, -- interned string literals, referenced as str#N in the IR
+    loops = {},   -- stack of {continueLabel, breakLabel} for break/continue
     labelCount = 0,
   }, Codegen)
 end
@@ -30,11 +32,15 @@ end
 
 function Codegen:gen_expression(node)
   if node.type == "literal" then
-    if type(node.value) ~= "number" then
-      error("Unsupported literal value: "..tostring(node.value))
-    end
     local r = self:next_reg()
-    self:emit(string.format("MOV %s, %s", r, node.value))
+    if type(node.value) == "string" then
+      -- strings can't ride in the space-delimited IR, so intern them and
+      -- reference the pool slot; the VM resolves str#N back to the text
+      self.strings[#self.strings + 1] = node.value
+      self:emit(string.format("MOV %s, str#%d", r, #self.strings))
+    else
+      self:emit(string.format("MOV %s, %s", r, node.value))
+    end
     return r
   elseif node.type == "identifier" then
     local c = self.consts[node.name]
@@ -243,11 +249,15 @@ end
 function Codegen:gen_for(node)
   self:gen_statement(node.init)
   local top = self:new_label("for")
+  local cont = self:new_label("forcont") -- continue lands here, before update
   local done = self:new_label("endfor")
   self:emit(top .. ":")
   local cond_reg = self:gen_expression(node.cond)
   self:emit(string.format("JZ %s, %s", cond_reg, done))
+  table.insert(self.loops, {continueLabel = cont, breakLabel = done})
   self:gen_block(node.body)
+  table.remove(self.loops)
+  self:emit(cont .. ":")
   self:gen_statement(node.update)
   self:emit(string.format("JMP %s", top))
   self:emit(done .. ":")
@@ -272,6 +282,24 @@ function Codegen:gen_switch(node)
   if node.default then
     self:gen_block(node.default)
   end
+  self:emit(endl .. ":")
+end
+
+-- try/catch: TRY installs a handler for the body; ENDTRY removes it on
+-- normal completion; a THROW (here or in a called function) jumps to the
+-- catch label, where CATCH binds the thrown value to the handler variable.
+function Codegen:gen_try(node)
+  local catchl = self:new_label("catch")
+  local endl = self:new_label("endtry")
+  self:emit("TRY " .. catchl)
+  self:gen_block(node.body)
+  self:emit("ENDTRY")
+  self:emit("JMP " .. endl)
+  self:emit(catchl .. ":")
+  local r = self:next_reg()
+  self.env[node.catchVar] = r
+  self:emit(string.format("CATCH %s", r))
+  self:gen_block(node.handler)
   self:emit(endl .. ":")
 end
 
@@ -310,9 +338,19 @@ function Codegen:gen_statement(node)
     self:gen_for(node)
   elseif node.type == "switch" then
     self:gen_switch(node)
+  elseif node.type == "break" or node.type == "continue" then
+    local loop = self.loops[#self.loops]
+    if not loop then error(node.type .. " outside loop") end
+    local target = node.type == "break" and loop.breakLabel
+                   or loop.continueLabel
+    self:emit("JMP " .. target)
+  elseif node.type == "throw" then
+    self:emit("THROW " .. self:gen_expression(node.value))
+  elseif node.type == "try" then
+    self:gen_try(node)
   elseif node.type == "typedef" or node.type == "struct"
-      or node.type == "enum" then
-    -- type-level only, emits no code (enums registered in the pre-pass)
+      or node.type == "enum" or node.type == "import" then
+    -- declaration-level only, emits no code (imports handled by the runner)
   elseif node.type == "block" then
     self:gen_block(node.statements)
     local ret_reg = self:gen_expression(node.value)

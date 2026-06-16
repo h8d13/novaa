@@ -53,6 +53,9 @@ local keywords = {
   ["fn"]=true, ["if"]=true, ["else"]=true, ["for"]=true, ["return"]=true,
   ["typedef"]=true, ["struct"]=true,
   ["switch"]=true, ["case"]=true, ["default"]=true, ["enum"]=true,
+  ["break"]=true, ["continue"]=true,
+  ["try"]=true, ["catch"]=true, ["except"]=true, ["throw"]=true,
+  ["import"]=true,
 }
 
 local function is_space(c) return c == ' ' or c == '\n' or c == '\r' or c == '\t' end
@@ -207,10 +210,16 @@ Parser = Object:new()
     elseif tok.type == TokenType.Ident then
       if tok.value == "true" then return {type="literal", value=1} end
       if tok.value == "false" then return {type="literal", value=0} end
-      if self:peek().value == "(" then
-        return self:parse_call(tok.value)
+      -- qualified name: module.func (e.g. math.sqrt, cjson.encode)
+      local name = tok.value
+      while self:peek().value == "." do
+        self:next()
+        name = name .. "." .. self:expect(TokenType.Ident).value
       end
-      return {type="identifier", name=tok.value}
+      if self:peek().value == "(" then
+        return self:parse_call(name)
+      end
+      return {type="identifier", name=name}
     elseif tok.value == "(" then
       local expr = self:parse_expression()
       self:expect(")")
@@ -313,6 +322,20 @@ Parser = Object:new()
       return self:parse_switch()
     elseif tok.type == TokenType.Keyword and tok.value == "enum" then
       return self:parse_enum()
+    elseif tok.type == TokenType.Keyword and tok.value == "break" then
+      self:next()
+      return {type="break"}
+    elseif tok.type == TokenType.Keyword and tok.value == "continue" then
+      self:next()
+      return {type="continue"}
+    elseif tok.type == TokenType.Keyword and tok.value == "try" then
+      return self:parse_try()
+    elseif tok.type == TokenType.Keyword and tok.value == "throw" then
+      self:next()
+      return {type="throw", value=self:parse_expression()}
+    elseif tok.type == TokenType.Keyword and tok.value == "import" then
+      self:next()
+      return {type="import", module=self:expect(TokenType.Ident).value}
     elseif tok.type == TokenType.Keyword and tok.value == "return" then
       self:next()
       local values = {self:parse_expression()}
@@ -342,6 +365,20 @@ Parser = Object:new()
     end
     self:expect("}")
     return {type="enum", name=name, variants=variants}
+  end
+
+  -- try { body } catch e { handler } -- `except` accepted as a synonym
+  function Parser:parse_try()
+    self:expect("try")
+    local body = self:parse_block()
+    local kw = self:peek().value
+    if kw ~= "catch" and kw ~= "except" then
+      error("Expected catch/except after try, got " .. kw)
+    end
+    self:next()
+    local var = self:expect(TokenType.Ident).value
+    local handler = self:parse_block()
+    return {type="try", body=body, catchVar=var, handler=handler}
   end
 
   function Parser:parse_switch()
