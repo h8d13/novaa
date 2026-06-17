@@ -2,7 +2,7 @@
 
 > Everything in this readme is mostly functional.
 
-Welcome to `avon` a transpiler, it takes `.nova` code as input passes it through a `parser` and emits `lua` compiled byte-code directly.
+Welcome to `avon`, a transpiler; takes code as input passes it through a `parser` and emits `lua` compiled byte-code directly.
 
 **Requires** Lua 5.3/5.4  or LuaJIT (not vanilla 5.1, the output uses `goto`).
 Run it under LuaJIT for ~5–14× on hot code: `luajit ./nova prog.nova`.
