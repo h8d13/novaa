@@ -13,6 +13,7 @@ Run it under LuaJIT for ~5–14× on hot code: `luajit ./nova prog.nova`.
 
 `avon` is a modern simplified C++ built on Lua, designed for clarity and modern expression.
 It uses `fn` for function declarations, first class multiple return times and omits parentheses for conditional statements, and optional curly braces for single expression functions, too.
+Mostly tested only on **Unix** systems.
 
 ---
 
@@ -216,8 +217,9 @@ fn str roundtrip() {
 }
 ```
 
-`import` also loads other `.nova` files; dotted paths are folders under the
-project root, and a name with no matching file falls back to `require`:
+`import` also loads other Nova files (`.nova`, or the extensionless file of
+that name); dotted paths are folders under the project root, and a name with
+no matching file falls back to `require`:
 
 ```cpp
 import geom         // root/geom.nova    -> geom.fn(...)
