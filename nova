@@ -13,7 +13,7 @@ package.path = here .. "/lang/?.lua;" .. here .. "/codegen/?.lua;"
             .. package.path
 
 local Parser = require("parser")
-local Avon = require("avon")
+local Loader = require("loader")
 
 local file, entry, callargs = nil, "main", {}
 local i = 1
@@ -72,27 +72,10 @@ local ok, result = pcall(function()
     end
   end
 
-  -- host builtins exposed to Nova code, mirroring the old VM stdlib. The
-  -- transpiled Lua calls them by global name, so they live in the chunk's
-  -- environment. `import foo` binds the module table as the global `foo`
-  -- (so foo.fn(...) is plain Lua indexing); `import foo as f` binds it as f.
-  -- math is taken from globals, anything else is require()d, so luarocks
-  -- packages work the same way.
-  local env = {pow = function(a, b) return a ^ b end}
-  env.print = function(...) print(...) return 0 end
-  for _, name in ipairs({"sqrt", "floor", "ceil", "sin", "cos", "log"}) do
-    env[name] = math[name]
-  end
-  for _, node in ipairs(ast.body) do
-    if node.type == "import" then
-      env[node.alias or node.module] =
-        _G[node.module] or require(node.module)
-    end
-  end
-
-  -- transpile the AST to Lua and load it; the entry is a real Lua function
+  -- compile the entry and recursively resolve/link its imports (Nova-file
+  -- modules first, host modules via require), then call the entry function
   local unpack = table.unpack or unpack -- 5.2+ vs 5.1/LuaJIT
-  local mods = Avon.load(ast.body, env)
+  local mods = Loader.run(file)
   return {mods[entry](unpack(callargs))}
 end)
 

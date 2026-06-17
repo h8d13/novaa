@@ -358,9 +358,15 @@ Parser = Object:new()
       return {type="throw", value=self:parse_expression()}
     elseif tok.type == TokenType.Keyword and tok.value == "import" then
       self:next()
+      -- dotted module path: `import a.b.c` -> "a.b.c" (a nested .nova file or a
+      -- nested host module). Same `.`-loop as a qualified call name.
       local module = self:expect(TokenType.Ident).value
-      -- optional `as <alias>`: bind the module under a different prefix.
-      -- `as` is contextual (a plain ident), so it stays usable as a name.
+      while self:peek().value == "." do
+        self:next()
+        module = module .. "." .. self:expect(TokenType.Ident).value
+      end
+      -- optional `as <alias>`: bind the module under a different name. `as` is
+      -- contextual (a plain ident), so it stays usable as a name.
       local alias = module
       if self:peek().value == "as" then
         self:next()

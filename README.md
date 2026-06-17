@@ -9,7 +9,7 @@ Run it under LuaJIT for ~5–14× on hot code: `luajit ./nova prog.nova`.
 
 > Note: under LuaJIT (doubles only) integers are exact to 2⁵³ and bitwise is 32-bit; Lua 5.4 gives full 64-bit.
 
-# Avon
+# Avon - 艾汶
 
 `avon` is a modern simplified C++ built on Lua, designed for clarity and modern expression.
 It uses `fn` for function declarations, first class multiple return times and omits parentheses for conditional statements, and optional curly braces for single expression functions, too.
@@ -216,7 +216,12 @@ fn str roundtrip() {
 }
 ```
 
-Under the hood `import` is Lua's `require`, the same mechanism the compiler
-itself is assembled from.
+`import` also loads other `.nova` files; dotted paths are folders under the
+project root, and a name with no matching file falls back to `require`:
+
+```cpp
+import geom         // root/geom.nova    -> geom.fn(...)
+import a.b.c as g   // root/a/b/c.nova    -> g.fn(...)
+```
 
 > A minimal language earns its minimalism by not rebuilding what the host already does well.
