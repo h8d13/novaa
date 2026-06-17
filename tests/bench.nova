@@ -1,6 +1,6 @@
-// Benchmark workloads, timed individually by tests/bench.lua against three
-// backends: the IR VM, the tree-walk interpreter, and hand-written Lua.
-// Each isolates a different cost: call/return, loop dispatch, memory traffic.
+// Benchmark workloads, timed individually by tests/bench.lua against avon
+// (transpiled to Lua) and hand-written Lua. Each isolates a different cost:
+// call/return, loop dispatch, memory traffic.
 
 // call + return + branch heavy (recursion exercises the calling convention)
 fn int fib(int n) {
@@ -17,7 +17,7 @@ fn int loopsum(int n) {
   return s
 }
 
-// memory traffic: fill a fixed array then sum it (LOAD/STORE + addressing)
+// memory traffic: fill a fixed array then sum it
 fn int arraywork(int reps) {
   int s = 0;
   for int k = 0; k < reps; ++k {

@@ -6,7 +6,7 @@
 local Parser = require("lang/parser")
 local Avon = require("codegen/avon")
 
-local fh = assert(io.open("bench.nova", "r"))
+local fh = assert(io.open("tests/bench.nova", "r"))
 local nova_src = fh:read("*a"); fh:close()
 local ast = Parser:new(nova_src):parse()
 
