@@ -37,5 +37,4 @@ cp editors/ftdetect_nova.vim ~/.config/nvim/ftdetect/nova.vim
 These are regex highlighters (keywords, types, constants, numbers, strings,
 `//` and `/* */` comments, operators, and function names).
 
-For GitHub, see the `linguist-language=C++` mapping in `.gitattributes` instead, GitHub only
-highlights languages Linguist already ships.
+For GitHub, see the `linguist-language=C++` mapping in `.gitattributes` instead, it's "close enough".
