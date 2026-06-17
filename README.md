@@ -202,9 +202,8 @@ fn int hypot(int a, int b) {
 }
 ```
 
-A `luarocks` package is no different -- install it, put its rock tree on
-Lua's path the usual way (`eval "$(luarocks path)"`), then `import` it (run
-under the Lua version the rock was built for):
+A `luarocks` package is no different -- install it so it's on Lua's path,
+then `import` it (run under the Lua version the rock was built for):
 
 ```nova
 import cjson
