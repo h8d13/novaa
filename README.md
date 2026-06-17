@@ -77,11 +77,6 @@ fn main() {
 
 *curly braces are optional for single expressions for functions, too*
 
-```cpp
-fn main()
-  print("Hello, " + name)
-```
-
 natively supports multiple return values just likr arguments, too
 
 ```cpp
@@ -159,7 +154,7 @@ int w = row()[0];
 ```cpp
 switch color {
 	case Red:
-    		print("Stop")
+		print("Stop")
   	case Green:
     		print("Go")
   	default:
@@ -186,9 +181,9 @@ fn risky()
 ```cpp
 fn main() {
 	try
-    		risky()
+		risky()
   	catch err
-    		print("Error was: " + err)
+		print("Error was: " + err)
 }
 ```
 
@@ -214,7 +209,7 @@ then `import` it (run under the Lua version the rock was built for):
 import cjson
 
 fn str roundtrip() {
-  return cjson.encode(cjson.decode("[10, 20, 30]"))
+	return cjson.encode(cjson.decode("[10, 20, 30]"))
 }
 ```
 
