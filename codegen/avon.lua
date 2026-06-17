@@ -22,6 +22,10 @@
 -- targets a loop OUTSIDE the try cannot cross the closure -- Lua rejects it at
 -- load (a loud error, never a silent miscompile); break/continue to a loop that
 -- is itself inside the body work fine.
+--
+-- The emitters below take a compile context `cx` (buffer, indent, type maps,
+-- label counters) instead of capturing it as upvalues, so they live at file
+-- scope and each stays shallow rather than nesting inside one big compile().
 local Avon = {}
 
 local function is_strlit(n) return n.type == "literal" and type(n.value) == "string" end
@@ -49,513 +53,498 @@ local cmp = {
 	["!="] = "~=",
 }
 
-function Avon.compile(body)
-	-- declaration-level maps used for typing and constant inlining
-	local consts = {} -- enum variant -> integer value
-	local typedefs = {} -- typedef alias -> base type name
-	local ret_int = {} -- user function name -> first return type is int?
-	for _, n in ipairs(body) do
-		if n.type == "enum" then
-			for i, v in ipairs(n.variants) do
-				consts[v] = i - 1
-			end
-		elseif n.type == "typedef" then
-			typedefs[n.alias] = n.base and n.base.name or nil
-		end
-	end
-	-- a Nova type name is int unless it (after following typedefs) is `float`
-	local function is_int_type(name)
-		local seen = 0
-		while typedefs[name] and seen < 16 do
-			name = typedefs[name]
-			seen = seen + 1
-		end
-		return name ~= "float"
-	end
-	for _, n in ipairs(body) do
-		if n.type == "function" then
-			ret_int[n.name] = is_int_type(n.returnTypes and n.returnTypes[1])
-		end
-	end
+-- mutually recursive emitters (E <-> E_binary <-> Econd, emit_stmt <-> block),
+-- forward-declared so the bodies below can reference each other.
+local E, E_binary, Econd, is_int, args_str
+local emit_decl, emit_decl_list, emit_for_init, emit_assign
+local emit_stmt, emit_switch, emit_try, block
 
-	local buf, ind = {}, 0
-	local function push(s) buf[#buf + 1] = string.rep("  ", ind) .. s end
-	local labelc, subjc, tryc = 0, 0, 0
-	local function newcont()
-		labelc = labelc + 1
-		return "__cont" .. labelc
+-- append one source line at the current indent
+local function push(cx, s) cx.buf[#cx.buf + 1] = string.rep("  ", cx.ind) .. s end
+
+-- mint a fresh `continue`-target label
+local function newcont(cx)
+	cx.labelc = cx.labelc + 1
+	return "__cont" .. cx.labelc
+end
+
+-- a Nova type name is int unless it (after following typedefs) is `float`
+local function is_int_type(cx, name)
+	local seen = 0
+	while cx.typedefs[name] and seen < 16 do
+		name = cx.typedefs[name]
+		seen = seen + 1
 	end
+	return name ~= "float"
+end
 
-	-- per-function scalar type map (name -> "int" | "float" | "arr:int" | ...);
-	-- set when each function is emitted, read by is_int.
-	local typeenv = {}
-	local E, E_binary, Econd, emit_stmt, emit_decl, block, is_int
+function args_str(cx, list)
+	local t = {}
+	for i, a in ipairs(list) do
+		t[i] = E(cx, a)
+	end
+	return table.concat(t, ", ")
+end
 
-	local function args_str(list)
-		local t = {}
-		for i, a in ipairs(list) do
-			t[i] = E(a)
+function E(cx, node)
+	local t = node.type
+	if t == "literal" then
+		if type(node.value) == "string" then
+			return string.format("%q", node.value)
 		end
-		return table.concat(t, ", ")
-	end
-
-	E = function(node)
-		local t = node.type
-		if t == "literal" then
-			if type(node.value) == "string" then
-				return string.format("%q", node.value)
-			end
-			return tostring(node.value)
-		elseif t == "identifier" then
-			local c = consts[node.name]
-			if c ~= nil then return tostring(c) end
-			return node.name
-		elseif t == "index" then
-			-- E(array) is already a valid Lua prefix (a name, a chained
-			-- index, or a parenthesized call), so no extra parens: a
-			-- leading '(' here would glue onto the previous statement as
-			-- a call.
-			return E(node.array) .. "[" .. E(node.index) .. "]"
-		elseif t == "unary" then
-			local r = E(node.right)
-			if node.op == "!" then
-				return "((" .. r .. ") == 0 and 1 or 0)"
-			end
-			if node.op == "~" then
-				return JIT and ("bit.bnot(" .. r .. ")")
-					or ("(~(" .. r .. "))")
-			end
-			return "(-(" .. r .. "))"
-		elseif t == "ternary" then
-			return "("
-				.. Econd(node.cond)
-				.. " and ("
-				.. E(node.thenE)
-				.. ") or ("
-				.. E(node.elseE)
-				.. "))"
-		elseif t == "call" then
-			-- parenthesize so a multi-return call yields only its primary
-			-- value in expression position (matches the VM taking result
-			-- slot 0); destructure and bare-call-statement build their own
-			-- call text and keep all values
-			return "(" .. node.name .. "(" .. args_str(node.args) .. "))"
-		elseif t == "binary" then
-			return E_binary(node)
+		return tostring(node.value)
+	elseif t == "identifier" then
+		local c = cx.consts[node.name]
+		if c ~= nil then return tostring(c) end
+		return node.name
+	elseif t == "index" then
+		-- E(array) is already a valid Lua prefix (a name, a chained index, or
+		-- a parenthesized call), so no extra parens: a leading '(' here would
+		-- glue onto the previous statement as a call.
+		return E(cx, node.array) .. "[" .. E(cx, node.index) .. "]"
+	elseif t == "unary" then
+		local r = E(cx, node.right)
+		if node.op == "!" then return "((" .. r .. ") == 0 and 1 or 0)" end
+		if node.op == "~" then
+			return JIT and ("bit.bnot(" .. r .. ")") or ("(~(" .. r .. "))")
 		end
-		error("transpile expr: unhandled " .. tostring(t))
+		return "(-(" .. r .. "))"
+	elseif t == "ternary" then
+		return "("
+			.. Econd(cx, node.cond)
+			.. " and ("
+			.. E(cx, node.thenE)
+			.. ") or ("
+			.. E(cx, node.elseE)
+			.. "))"
+	elseif t == "call" then
+		-- parenthesize so a multi-return call yields only its primary value in
+		-- expression position (matches the VM taking result slot 0);
+		-- destructure and bare-call-statement build their own call text and
+		-- keep all values
+		return "(" .. node.name .. "(" .. args_str(cx, node.args) .. "))"
+	elseif t == "binary" then
+		return E_binary(cx, node)
 	end
+	error("transpile expr: unhandled " .. tostring(t))
+end
 
-	-- is_int(node): does this expression have Nova int type? Drives truncating
-	-- vs real division, decided statically because LuaJIT has no int subtype.
-	-- Unknowns default conservatively: undeclared names -> int (Nova's default),
-	-- unknown calls / non-named array bases -> not int (real division).
-	is_int = function(node)
-		local t = node.type
-		if t == "literal" then
-			return type(node.value) ~= "string" and not node.isFloat
-		elseif t == "identifier" then
-			if consts[node.name] ~= nil then return true end
-			local ty = typeenv[node.name]
-			return ty == nil or ty == "int"
-		elseif t == "index" then
-			return node.array.type == "identifier"
-				and typeenv[node.array.name] == "arr:int"
-		elseif t == "call" then
-			return ret_int[node.name] == true
-		elseif t == "unary" then
-			if node.op == "!" or node.op == "~" then return true end
-			return is_int(node.right) -- unary minus
-		elseif t == "ternary" then
-			return is_int(node.thenE) and is_int(node.elseE)
-		elseif t == "binary" then
-			local op = node.op
-			if op == "&&" or op == "||" or cmp[op] then return true end
-			if
-				op == "&"
-				or op == "|"
-				or op == "^"
-				or op == "<<"
-				or op == ">>"
-			then
-				return true
-			end
-			if
-				op == "+"
-				and (is_strlit(node.left) or is_strlit(node.right))
-			then
-				return false -- string concatenation
-			end
-			return is_int(node.left) and is_int(node.right)
-		end
-		return false
-	end
-
-	-- Econd(node): a Lua boolean expression for `node` tested as a Nova truth
-	-- value (non-zero). Comparisons and && / || stay boolean and short-circuit;
-	-- anything else falls back to `(value) ~= 0`. In a condition the `1/0`
-	-- round-trip is wasted (it was the top line in every loop under the profiler).
-	Econd = function(node)
-		if node.type == "binary" then
-			local op = node.op
-			if op == "&&" then
-				return "("
-					.. Econd(node.left)
-					.. " and "
-					.. Econd(node.right)
-					.. ")"
-			elseif op == "||" then
-				return "("
-					.. Econd(node.left)
-					.. " or "
-					.. Econd(node.right)
-					.. ")"
-			elseif cmp[op] then
-				return "(("
-					.. E(node.left)
-					.. ") "
-					.. cmp[op]
-					.. " ("
-					.. E(node.right)
-					.. "))"
-			end
-		elseif node.type == "unary" and node.op == "!" then
-			return "((" .. E(node.right) .. ") == 0)"
-		end
-		return "((" .. E(node) .. ") ~= 0)"
-	end
-
-	E_binary = function(node)
+-- is_int(node): does this expression have Nova int type? Drives truncating vs
+-- real division, decided statically because LuaJIT has no int subtype. Unknowns
+-- default conservatively: undeclared names -> int (Nova's default), unknown
+-- calls / non-named array bases -> not int (real division).
+function is_int(cx, node)
+	local t = node.type
+	if t == "literal" then
+		return type(node.value) ~= "string" and not node.isFloat
+	elseif t == "identifier" then
+		if cx.consts[node.name] ~= nil then return true end
+		local ty = cx.typeenv[node.name]
+		return ty == nil or ty == "int"
+	elseif t == "index" then
+		return node.array.type == "identifier"
+			and cx.typeenv[node.array.name] == "arr:int"
+	elseif t == "call" then
+		return cx.ret_int[node.name] == true
+	elseif t == "unary" then
+		if node.op == "!" or node.op == "~" then return true end
+		return is_int(cx, node.right) -- unary minus
+	elseif t == "ternary" then
+		return is_int(cx, node.thenE) and is_int(cx, node.elseE)
+	elseif t == "binary" then
 		local op = node.op
-		if op == "=" then
-			error("transpile: assignment in expression position unsupported")
+		if op == "&&" or op == "||" or cmp[op] then return true end
+		if op == "&" or op == "|" or op == "^" or op == "<<" or op == ">>" then
+			return true
 		end
-		-- boolean-valued ops: build the Lua boolean, then materialize to 1/0
-		if op == "&&" or op == "||" or cmp[op] then
-			return "(" .. Econd(node) .. " and 1 or 0)"
+		if op == "+" and (is_strlit(node.left) or is_strlit(node.right)) then
+			return false -- string concatenation
 		end
-		local L, R = E(node.left), E(node.right)
-		if op == "+" then
-			if is_strlit(node.left) or is_strlit(node.right) then
-				return "(tostring(" .. L .. ") .. tostring(" .. R .. "))"
-			end
-			return "((" .. L .. ") + (" .. R .. "))"
-		end
-		if op == "-" or op == "*" then
-			return "((" .. L .. ") " .. op .. " (" .. R .. "))"
-		end
-		-- int/int truncates toward zero; otherwise real division (static choice)
-		if op == "/" then
-			if is_int(node.left) and is_int(node.right) then
-				return "__idiv(" .. L .. ", " .. R .. ")"
-			end
-			return "((" .. L .. ") / (" .. R .. "))"
-		end
-		if op == "%" then
-			if is_int(node.left) and is_int(node.right) then
-				return "__imod(" .. L .. ", " .. R .. ")"
-			end
-			return "__fmod(" .. L .. ", " .. R .. ")"
-		end
-		-- bitwise: operators on 5.3/5.4, the `bit` library on LuaJIT
-		if JIT then
-			local jb = {
-				["&"] = "band",
-				["|"] = "bor",
-				["^"] = "bxor",
-				["<<"] = "lshift",
-				[">>"] = "rshift",
-			}
-			if jb[op] then
-				return "bit." .. jb[op] .. "(" .. L .. ", " .. R .. ")"
-			end
-		else
-			local lb = {
-				["&"] = "&",
-				["|"] = "|",
-				["^"] = "~",
-				["<<"] = "<<",
-				[">>"] = ">>",
-			}
-			if lb[op] then
-				return "((" .. L .. ") " .. lb[op] .. " (" .. R .. "))"
-			end
-		end
-		error("transpile binary: unhandled " .. tostring(op))
+		return is_int(cx, node.left) and is_int(cx, node.right)
 	end
+	return false
+end
 
-	emit_decl = function(d)
-		if d.varType and d.varType.type == "arraytype" then
-			typeenv[d.name] = is_int_type(d.varType.base) and "arr:int"
-				or "arr:float"
-			push("local " .. d.name .. " = setmetatable({}, __ZERO)")
-		else
-			typeenv[d.name] = is_int_type(d.varType and d.varType.name)
-					and "int"
-				or "float"
-			push(
-				"local "
-					.. d.name
-					.. " = "
-					.. (d.value and E(d.value) or "0")
-			)
+-- Econd(node): a Lua boolean expression for `node` tested as a Nova truth value
+-- (non-zero). Comparisons and && / || stay boolean and short-circuit; anything
+-- else falls back to `(value) ~= 0`. In a condition the `1/0` round-trip is
+-- wasted (it was the top line in every loop under the profiler).
+function Econd(cx, node)
+	if node.type == "binary" then
+		local op = node.op
+		if op == "&&" then
+			return "("
+				.. Econd(cx, node.left)
+				.. " and "
+				.. Econd(cx, node.right)
+				.. ")"
+		elseif op == "||" then
+			return "("
+				.. Econd(cx, node.left)
+				.. " or "
+				.. Econd(cx, node.right)
+				.. ")"
+		elseif cmp[op] then
+			return "(("
+				.. E(cx, node.left)
+				.. ") "
+				.. cmp[op]
+				.. " ("
+				.. E(cx, node.right)
+				.. "))"
+		end
+	elseif node.type == "unary" and node.op == "!" then
+		return "((" .. E(cx, node.right) .. ") == 0)"
+	end
+	return "((" .. E(cx, node) .. ") ~= 0)"
+end
+
+function E_binary(cx, node)
+	local op = node.op
+	if op == "=" then
+		error("transpile: assignment in expression position unsupported")
+	end
+	-- boolean-valued ops: build the Lua boolean, then materialize to 1/0
+	if op == "&&" or op == "||" or cmp[op] then
+		return "(" .. Econd(cx, node) .. " and 1 or 0)"
+	end
+	local L, R = E(cx, node.left), E(cx, node.right)
+	if op == "+" then
+		if is_strlit(node.left) or is_strlit(node.right) then
+			return "(tostring(" .. L .. ") .. tostring(" .. R .. "))"
+		end
+		return "((" .. L .. ") + (" .. R .. "))"
+	end
+	if op == "-" or op == "*" then
+		return "((" .. L .. ") " .. op .. " (" .. R .. "))"
+	end
+	-- int/int truncates toward zero; otherwise real division (static choice)
+	if op == "/" then
+		if is_int(cx, node.left) and is_int(cx, node.right) then
+			return "__idiv(" .. L .. ", " .. R .. ")"
+		end
+		return "((" .. L .. ") / (" .. R .. "))"
+	end
+	if op == "%" then
+		if is_int(cx, node.left) and is_int(cx, node.right) then
+			return "__imod(" .. L .. ", " .. R .. ")"
+		end
+		return "__fmod(" .. L .. ", " .. R .. ")"
+	end
+	-- bitwise: operators on 5.3/5.4, the `bit` library on LuaJIT
+	if JIT then
+		local jb = {
+			["&"] = "band",
+			["|"] = "bor",
+			["^"] = "bxor",
+			["<<"] = "lshift",
+			[">>"] = "rshift",
+		}
+		if jb[op] then return "bit." .. jb[op] .. "(" .. L .. ", " .. R .. ")" end
+	else
+		local lb = {
+			["&"] = "&",
+			["|"] = "|",
+			["^"] = "~",
+			["<<"] = "<<",
+			[">>"] = ">>",
+		}
+		if lb[op] then return "((" .. L .. ") " .. lb[op] .. " (" .. R .. "))" end
+	end
+	error("transpile binary: unhandled " .. tostring(op))
+end
+
+function emit_decl(cx, d)
+	if d.varType and d.varType.type == "arraytype" then
+		cx.typeenv[d.name] = is_int_type(cx, d.varType.base) and "arr:int"
+			or "arr:float"
+		push(cx, "local " .. d.name .. " = setmetatable({}, __ZERO)")
+	else
+		cx.typeenv[d.name] = is_int_type(cx, d.varType and d.varType.name)
+				and "int"
+			or "float"
+		push(
+			cx,
+			"local " .. d.name .. " = " .. (d.value and E(cx, d.value) or "0")
+		)
+	end
+end
+
+-- a bare decl list (no .type): `int a, b = f()` destructures when it fits the
+-- shape, otherwise each decl emits on its own line.
+function emit_decl_list(cx, decls)
+	if is_destructure(decls) then
+		local call = decls[#decls].value
+		local ns = {}
+		for i, d in ipairs(decls) do
+			ns[i] = d.name
+		end
+		push(
+			cx,
+			"local "
+				.. table.concat(ns, ", ")
+				.. " = "
+				.. call.name
+				.. "("
+				.. args_str(cx, call.args)
+				.. ")"
+		)
+	else
+		for _, d in ipairs(decls) do
+			emit_decl(cx, d)
 		end
 	end
+end
 
-	emit_stmt = function(node, cl)
-		if not node.type then -- decl list
-			if is_destructure(node) then
-				local call = node[#node].value
-				local ns = {}
-				for i, d in ipairs(node) do
-					ns[i] = d.name
-				end
-				push(
-					"local "
-						.. table.concat(ns, ", ")
-						.. " = "
-						.. call.name
-						.. "("
-						.. args_str(call.args)
-						.. ")"
-				)
-			else
-				for _, d in ipairs(node) do
-					emit_decl(d)
-				end
-			end
-			return
+-- a for-init is either a decl list (looped, never destructured) or one statement
+function emit_for_init(cx, init, cl)
+	if not init.type then
+		for _, d in ipairs(init) do
+			emit_decl(cx, d)
 		end
+	else
+		emit_stmt(cx, init, cl)
+	end
+end
 
-		local t = node.type
-		if t == "decl" then
-			emit_decl(node)
-		elseif t == "binary" then
-			if node.op == "=" then
-				local tgt = node.left
-				if tgt.type == "index" then
-					push(
-						E(tgt.array)
-							.. "["
-							.. E(tgt.index)
-							.. "] = "
-							.. E(node.right)
-					)
-				else
-					push(tgt.name .. " = " .. E(node.right))
-				end
-			else
-				push("local _ = " .. E(node)) -- bare expression (rare)
-			end
-		elseif t == "call" then
-			push(node.name .. "(" .. args_str(node.args) .. ")")
-		elseif t == "index" or t == "identifier" or t == "literal" then
-			push("local _ = " .. E(node))
-		elseif t == "if" then
-			push("if " .. Econd(node.cond) .. " then")
-			ind = ind + 1
-			block(node.thenBranch, cl)
-			ind = ind - 1
-			if node.elseBranch then
-				push("else")
-				ind = ind + 1
-				block(node.elseBranch, cl)
-				ind = ind - 1
-			end
-			push("end")
-		elseif t == "for" then
-			push("do")
-			ind = ind + 1
-			if not node.init.type then
-				for _, d in ipairs(node.init) do
-					emit_decl(d)
-				end
-			else
-				emit_stmt(node.init, cl)
-			end
-			local mycl = newcont()
-			push("while " .. Econd(node.cond) .. " do")
-			ind = ind + 1
-			push("do")
-			ind = ind + 1 -- body scope: keeps goto legal
-			block(node.body, mycl)
-			ind = ind - 1
-			push("end")
-			push("::" .. mycl .. "::")
-			emit_stmt(node.update, cl)
-			ind = ind - 1
-			push("end")
-			ind = ind - 1
-			push("end")
-		elseif t == "forin" then
-			local decl = node.init[1]
-			push("do")
-			ind = ind + 1
-			push("local " .. decl.name)
-			local mycl = newcont()
-			push("while true do")
-			ind = ind + 1
-			push(decl.name .. " = " .. E(decl.value))
-			push("if " .. decl.name .. " == 0 then break end")
-			push("do")
-			ind = ind + 1
-			block(node.body, mycl)
-			ind = ind - 1
-			push("end")
-			push("::" .. mycl .. "::")
-			ind = ind - 1
-			push("end")
-			ind = ind - 1
-			push("end")
-		elseif t == "switch" then
-			subjc = subjc + 1
-			local sv = "__subj" .. subjc
-			push("do")
-			ind = ind + 1
-			push("local " .. sv .. " = " .. E(node.subject))
-			local first = true
-			for _, c in ipairs(node.cases) do
-				push(
-					(first and "if " or "elseif ")
-						.. sv
-						.. " == ("
-						.. E(c.value)
-						.. ") then"
-				)
-				first = false
-				ind = ind + 1
-				block(c.body, cl)
-				ind = ind - 1
-			end
-			if node.default then
-				push(first and "if true then" or "else")
-				ind = ind + 1
-				block(node.default, cl)
-				ind = ind - 1
-				push("end")
-			elseif not first then
-				push("end")
-			end
-			ind = ind - 1
-			push("end")
-		elseif t == "break" then
-			push("break")
-		elseif t == "continue" then
-			if not cl then error("transpile: continue outside loop") end
-			push("goto " .. cl)
-		elseif t == "return" then
-			local vs = {}
-			for i, e in ipairs(node.values or {}) do
-				vs[i] = E(e)
-			end
-			push(
-				#vs == 0 and "return 0"
-					or ("return " .. table.concat(vs, ", "))
-			)
-		elseif t == "throw" then
-			push("error({nova=true, value=" .. E(node.value) .. "}, 0)")
-		elseif t == "try" then
-			-- pcall the body in a closure. A `return` inside the body
-			-- returns from the closure; we capture those values
-			-- (table.pack) and re-return them from the real function, so
-			-- try bodies can return. __NORET marks "fell through" (no
-			-- return). The `do ... end` lets a body return be the last
-			-- statement and still allow the trailing `return __NORET`
-			-- fallthrough.
-			tryc = tryc + 1
-			local r = "__try" .. tryc
-			push("local " .. r .. " = __pack(pcall(function()")
-			ind = ind + 1
-			push("do")
-			ind = ind + 1
-			block(node.body, nil)
-			ind = ind - 1
-			push("end")
-			push("return __NORET")
-			ind = ind - 1
-			push("end))")
-			push("if " .. r .. "[1] then")
-			ind = ind + 1
-			push(
-				"if "
-					.. r
-					.. "[2] ~= __NORET then return __unpack("
-					.. r
-					.. ", 2, "
-					.. r
-					.. ".n) end"
-			)
-			ind = ind - 1
-			push("else")
-			ind = ind + 1
-			push(
-				"local "
-					.. node.catchVar
-					.. " = ((type("
-					.. r
-					.. "[2]) == 'table' and "
-					.. r
-					.. "[2].nova) and "
-					.. r
-					.. "[2].value or "
-					.. r
-					.. "[2])"
-			)
-			block(node.handler, cl)
-			ind = ind - 1
-			push("end")
-		elseif
-			t == "typedef"
-			or t == "enum"
-			or t == "import"
-			or t == "function"
-		then
+-- assignment statement: `arr[i] = v` indexes the target, plain `x = v` names it
+function emit_assign(cx, node)
+	local tgt = node.left
+	if tgt.type == "index" then
+		push(
+			cx,
+			E(cx, tgt.array)
+				.. "["
+				.. E(cx, tgt.index)
+				.. "] = "
+				.. E(cx, node.right)
+		)
+	else
+		push(cx, tgt.name .. " = " .. E(cx, node.right))
+	end
+end
+
+function emit_stmt(cx, node, cl)
+	if not node.type then return emit_decl_list(cx, node) end -- decl list
+
+	local t = node.type
+	if t == "decl" then
+		emit_decl(cx, node)
+	elseif t == "binary" then
+		if node.op == "=" then
+			emit_assign(cx, node)
+		else
+			push(cx, "local _ = " .. E(cx, node)) -- bare expression (rare)
+		end
+	elseif t == "call" then
+		push(cx, node.name .. "(" .. args_str(cx, node.args) .. ")")
+	elseif t == "index" or t == "identifier" or t == "literal" then
+		push(cx, "local _ = " .. E(cx, node))
+	elseif t == "if" then
+		push(cx, "if " .. Econd(cx, node.cond) .. " then")
+		cx.ind = cx.ind + 1
+		block(cx, node.thenBranch, cl)
+		cx.ind = cx.ind - 1
+		if node.elseBranch then
+			push(cx, "else")
+			cx.ind = cx.ind + 1
+			block(cx, node.elseBranch, cl)
+			cx.ind = cx.ind - 1
+		end
+		push(cx, "end")
+	elseif t == "for" then
+		push(cx, "do")
+		cx.ind = cx.ind + 1
+		emit_for_init(cx, node.init, cl)
+		local mycl = newcont(cx)
+		push(cx, "while " .. Econd(cx, node.cond) .. " do")
+		cx.ind = cx.ind + 1
+		push(cx, "do")
+		cx.ind = cx.ind + 1 -- body scope: keeps goto legal
+		block(cx, node.body, mycl)
+		cx.ind = cx.ind - 1
+		push(cx, "end")
+		push(cx, "::" .. mycl .. "::")
+		emit_stmt(cx, node.update, cl)
+		cx.ind = cx.ind - 1
+		push(cx, "end")
+		cx.ind = cx.ind - 1
+		push(cx, "end")
+	elseif t == "forin" then
+		local decl = node.init[1]
+		push(cx, "do")
+		cx.ind = cx.ind + 1
+		push(cx, "local " .. decl.name)
+		local mycl = newcont(cx)
+		push(cx, "while true do")
+		cx.ind = cx.ind + 1
+		push(cx, decl.name .. " = " .. E(cx, decl.value))
+		push(cx, "if " .. decl.name .. " == 0 then break end")
+		push(cx, "do")
+		cx.ind = cx.ind + 1
+		block(cx, node.body, mycl)
+		cx.ind = cx.ind - 1
+		push(cx, "end")
+		push(cx, "::" .. mycl .. "::")
+		cx.ind = cx.ind - 1
+		push(cx, "end")
+		cx.ind = cx.ind - 1
+		push(cx, "end")
+	elseif t == "switch" then
+		emit_switch(cx, node, cl)
+	elseif t == "break" then
+		push(cx, "break")
+	elseif t == "continue" then
+		if not cl then error("transpile: continue outside loop") end
+		push(cx, "goto " .. cl)
+	elseif t == "return" then
+		local vs = {}
+		for i, e in ipairs(node.values or {}) do
+			vs[i] = E(cx, e)
+		end
+		push(cx, #vs == 0 and "return 0" or ("return " .. table.concat(vs, ", ")))
+	elseif t == "throw" then
+		push(cx, "error({nova=true, value=" .. E(cx, node.value) .. "}, 0)")
+	elseif t == "try" then
+		emit_try(cx, node, cl)
+	elseif t == "typedef" or t == "enum" or t == "import" or t == "function" then
 		-- declaration-level: no statement-position effect
-		else
-			error("transpile stmt: unhandled " .. tostring(t))
-		end
+	else
+		error("transpile stmt: unhandled " .. tostring(t))
 	end
+end
 
-	block = function(list, cl)
-		for _, st in ipairs(list) do
-			emit_stmt(st, cl)
-			local tt = st.type
-			if tt == "return" or tt == "break" or tt == "continue" then
-				break -- Lua requires these terminal in their block
-			end
-		end
+function emit_switch(cx, node, cl)
+	cx.subjc = cx.subjc + 1
+	local sv = "__subj" .. cx.subjc
+	push(cx, "do")
+	cx.ind = cx.ind + 1
+	push(cx, "local " .. sv .. " = " .. E(cx, node.subject))
+	local first = true
+	for _, c in ipairs(node.cases) do
+		push(
+			cx,
+			(first and "if " or "elseif ")
+				.. sv
+				.. " == ("
+				.. E(cx, c.value)
+				.. ") then"
+		)
+		first = false
+		cx.ind = cx.ind + 1
+		block(cx, c.body, cl)
+		cx.ind = cx.ind - 1
 	end
+	if node.default then
+		push(cx, first and "if true then" or "else")
+		cx.ind = cx.ind + 1
+		block(cx, node.default, cl)
+		cx.ind = cx.ind - 1
+		push(cx, "end")
+	elseif not first then
+		push(cx, "end")
+	end
+	cx.ind = cx.ind - 1
+	push(cx, "end")
+end
 
-	-- prelude: semantic shims, emitted as upvalues (not globals). int division
-	-- and mod are pre-selected by is_int, so these helpers are unconditional.
-	if JIT then push("local bit = require('bit')") end
-	push("local __floor, __ceil, __fmod = math.floor, math.ceil, math.fmod")
-	push("local function __trunc(x)")
-	push("  if x >= 0 then return __floor(x) else return __ceil(x) end")
-	push("end")
-	push("local function __idiv(a, b) return __trunc(a / b) end")
-	push("local function __imod(a, b) return a - __trunc(a / b) * b end")
-	-- table.pack/unpack are 5.2+; LuaJIT (5.1) needs the fallbacks
+-- pcall the body in a closure. A `return` inside the body returns from the
+-- closure; we capture those values (table.pack) and re-return them from the
+-- real function, so try bodies can return. __NORET marks "fell through" (no
+-- return). The `do ... end` lets a body return be the last statement and still
+-- allow the trailing `return __NORET` fallthrough.
+function emit_try(cx, node, cl)
+	cx.tryc = cx.tryc + 1
+	local r = "__try" .. cx.tryc
+	push(cx, "local " .. r .. " = __pack(pcall(function()")
+	cx.ind = cx.ind + 1
+	push(cx, "do")
+	cx.ind = cx.ind + 1
+	block(cx, node.body, nil)
+	cx.ind = cx.ind - 1
+	push(cx, "end")
+	push(cx, "return __NORET")
+	cx.ind = cx.ind - 1
+	push(cx, "end))")
+	push(cx, "if " .. r .. "[1] then")
+	cx.ind = cx.ind + 1
 	push(
-		"local __pack = table.pack or "
-			.. "function(...) return {n = select('#', ...), ...} end"
+		cx,
+		"if "
+			.. r
+			.. "[2] ~= __NORET then return __unpack("
+			.. r
+			.. ", 2, "
+			.. r
+			.. ".n) end"
 	)
-	push("local __unpack = table.unpack or unpack")
-	push("local __ZERO = {__index = function() return 0 end}")
-	push("local __NORET = {}") -- sentinel: a try body that returned no value
+	cx.ind = cx.ind - 1
+	push(cx, "else")
+	cx.ind = cx.ind + 1
+	push(
+		cx,
+		"local "
+			.. node.catchVar
+			.. " = ((type("
+			.. r
+			.. "[2]) == 'table' and "
+			.. r
+			.. "[2].nova) and "
+			.. r
+			.. "[2].value or "
+			.. r
+			.. "[2])"
+	)
+	block(cx, node.handler, cl)
+	cx.ind = cx.ind - 1
+	push(cx, "end")
+end
 
-	-- forward-declare every function name so call order / mutual recursion work
-	local names = {}
-	for _, n in ipairs(body) do
-		if n.type == "function" then names[#names + 1] = n.name end
+function block(cx, list, cl)
+	for _, st in ipairs(list) do
+		emit_stmt(cx, st, cl)
+		local tt = st.type
+		if tt == "return" or tt == "break" or tt == "continue" then
+			break -- Lua requires these terminal in their block
+		end
 	end
-	if #names > 0 then push("local " .. table.concat(names, ", ")) end
+end
 
-	-- Per-function minimum arg count over all internal call sites. Calls are
-	-- always by name (Nova has no first-class functions), so this is a complete
-	-- static view. A parameter needs its `or 0` default only if some call passes
-	-- fewer args than its position; a function never called internally has no
-	-- entry here and is treated as saturated (the runner pads entry args to 0).
+-- emit one Nova function: signature, missing-arg defaults, body, fallthrough
+local function emit_function(cx, n, min_args)
+	-- fresh scalar-type scope; param types seed is_int (param.type is a bare
+	-- type-name string in the parser)
+	cx.typeenv = {}
+	local ps = {}
+	for i, p in ipairs(n.params) do
+		ps[i] = p.name
+		cx.typeenv[p.name] = is_int_type(cx, p.type) and "int" or "float"
+	end
+	push(cx, "function " .. n.name .. "(" .. table.concat(ps, ", ") .. ")")
+	cx.ind = cx.ind + 1
+	-- default a missing arg to 0 (the VM zero-filled unbound params), but only
+	-- for params some call under-supplies: saturated params skip it. `or 0`
+	-- only rewrites nil; numbers (incl. 0), strings, arrays pass thru.
+	local ma = min_args[n.name]
+	for idx, p in ipairs(ps) do
+		if ma ~= nil and ma < idx then push(cx, p .. " = " .. p .. " or 0") end
+	end
+	push(cx, "do") -- wrap body so a fall-through can `return 0`
+	cx.ind = cx.ind + 1
+	block(cx, n.body, nil)
+	cx.ind = cx.ind - 1
+	push(cx, "end")
+	push(cx, "return 0")
+	cx.ind = cx.ind - 1
+	push(cx, "end")
+end
+
+-- the minimum arg count seen at any internal call site, per function name.
+-- Calls are always by name (Nova has no first-class functions), so this is a
+-- complete static view. A parameter needs its `or 0` default only if some call
+-- passes fewer args than its position; a function never called internally has
+-- no entry and is treated as saturated (the runner pads entry args to 0).
+local function scan_min_args(body)
 	local min_args = {}
 	local function scan(node)
 		if type(node) ~= "table" then return end
@@ -570,54 +559,79 @@ function Avon.compile(body)
 		end
 	end
 	scan(body)
+	return min_args
+end
 
+-- emit the prelude: semantic shims, as upvalues (not globals). int division and
+-- mod are pre-selected by is_int, so these helpers are unconditional.
+local function emit_prelude(cx)
+	if JIT then push(cx, "local bit = require('bit')") end
+	push(cx, "local __floor, __ceil, __fmod = math.floor, math.ceil, math.fmod")
+	push(cx, "local function __trunc(x)")
+	push(cx, "  if x >= 0 then return __floor(x) else return __ceil(x) end")
+	push(cx, "end")
+	push(cx, "local function __idiv(a, b) return __trunc(a / b) end")
+	push(cx, "local function __imod(a, b) return a - __trunc(a / b) * b end")
+	-- table.pack/unpack are 5.2+; LuaJIT (5.1) needs the fallbacks
+	push(
+		cx,
+		"local __pack = table.pack or "
+			.. "function(...) return {n = select('#', ...), ...} end"
+	)
+	push(cx, "local __unpack = table.unpack or unpack")
+	push(cx, "local __ZERO = {__index = function() return 0 end}")
+	push(cx, "local __NORET = {}") -- sentinel: a try body that returned no value
+end
+
+function Avon.compile(body)
+	local cx = {
+		buf = {},
+		ind = 0,
+		consts = {}, -- enum variant -> integer value
+		typedefs = {}, -- typedef alias -> base type name
+		ret_int = {}, -- user function name -> first return type is int?
+		typeenv = {}, -- per-function scalar types, reset before each function
+		labelc = 0,
+		subjc = 0,
+		tryc = 0,
+	}
+	for _, n in ipairs(body) do
+		if n.type == "enum" then
+			for i, v in ipairs(n.variants) do
+				cx.consts[v] = i - 1
+			end
+		elseif n.type == "typedef" then
+			cx.typedefs[n.alias] = n.base and n.base.name or nil
+		end
+	end
 	for _, n in ipairs(body) do
 		if n.type == "function" then
-			-- fresh scalar-type scope for this function; param types
-			-- seed is_int
-			-- (param.type is a bare type-name string in the parser)
-			typeenv = {}
-			local ps = {}
-			for i, p in ipairs(n.params) do
-				ps[i] = p.name
-				typeenv[p.name] = is_int_type(p.type) and "int" or "float"
-			end
-			push(
-				"function "
-					.. n.name
-					.. "("
-					.. table.concat(ps, ", ")
-					.. ")"
-			)
-			ind = ind + 1
-			-- default a missing arg to 0 (the VM zero-filled unbound
-			-- params), but only for params some call under-supplies:
-			-- saturated params skip it. `or 0` only rewrites nil; numbers
-			-- (incl. 0), strings, arrays pass thru.
-			local ma = min_args[n.name]
-			for idx, p in ipairs(ps) do
-				if ma ~= nil and ma < idx then
-					push(p .. " = " .. p .. " or 0")
-				end
-			end
-			push("do") -- wrap body so a fall-through can `return 0`
-			ind = ind + 1
-			block(n.body, nil)
-			ind = ind - 1
-			push("end")
-			push("return 0")
-			ind = ind - 1
-			push("end")
+			cx.ret_int[n.name] =
+				is_int_type(cx, n.returnTypes and n.returnTypes[1])
 		end
+	end
+
+	emit_prelude(cx)
+
+	-- forward-declare every function name so call order / mutual recursion work
+	local names = {}
+	for _, n in ipairs(body) do
+		if n.type == "function" then names[#names + 1] = n.name end
+	end
+	if #names > 0 then push(cx, "local " .. table.concat(names, ", ")) end
+
+	local min_args = scan_min_args(body)
+	for _, n in ipairs(body) do
+		if n.type == "function" then emit_function(cx, n, min_args) end
 	end
 
 	local kv = {}
 	for _, nm in ipairs(names) do
 		kv[#kv + 1] = nm .. " = " .. nm
 	end
-	push("return {" .. table.concat(kv, ", ") .. "}")
+	push(cx, "return {" .. table.concat(kv, ", ") .. "}")
 
-	return table.concat(buf, "\n")
+	return table.concat(cx.buf, "\n")
 end
 
 -- Compile Nova `body` and load it. `env` supplies builtins/imports (and falls

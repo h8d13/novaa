@@ -86,156 +86,164 @@ local function is_space(c) return c == " " or c == "\n" or c == "\r" or c == "\t
 local function is_alpha(c) return c:match("%a") ~= nil or c == "_" end
 local function is_digit(c) return c:match("%d") ~= nil end
 
+-- Main scan: skip whitespace/comments in place, then hand a token-producing
+-- character to the matching scanner. Each scanner reads/advances self.i and
+-- returns one token, so this loop stays a flat dispatch.
 function Tokenizer:next()
-	local input, i, len = self.input, self.i, self.len
+	local input, len = self.input, self.len
+	local i = self.i
 	while i <= len do
 		local c = input:sub(i, i)
-
 		if is_space(c) then
 			i = i + 1
-
-		-- line comment
 		elseif c == "/" and input:sub(i + 1, i + 1) == "/" then
-			i = i + 2
-			while i <= len and input:sub(i, i) ~= "\n" do
-				i = i + 1
-			end
-
-		-- block comment
+			i = self:skip_line_comment(i)
 		elseif c == "/" and input:sub(i + 1, i + 1) == "*" then
-			i = i + 2
-			while
-				i <= len
-				and not (
-					input:sub(i, i) == "*"
-					and input:sub(i + 1, i + 1) == "/"
-				)
-			do
-				i = i + 1
-			end
-			i = i + 2 -- skip closing */
-		elseif is_digit(c) then
-			local start = i
-			self.last_pos = i
-			while i <= len and is_digit(input:sub(i, i)) do
-				i = i + 1
-			end
-			-- fractional part: a '.' then at least one digit makes it a
-			-- float. Tag it: under Lua 5.1/LuaJIT every number is a double,
-			-- so the value alone cannot tell int from float; the backend
-			-- needs this for typing.
-			local isFloat = false
-			if
-				input:sub(i, i) == "."
-				and is_digit(input:sub(i + 1, i + 1))
-			then
-				isFloat = true
-				i = i + 1
-				while i <= len and is_digit(input:sub(i, i)) do
-					i = i + 1
-				end
-			end
-			self.i = i
-			return {
-				type = TokenType.Number,
-				value = tonumber(input:sub(start, i - 1)),
-				isFloat = isFloat,
-			}
-		elseif is_alpha(c) then
-			local start = i
-			self.last_pos = i
-			while i <= len and input:sub(i, i):match("[%w_]") do
-				i = i + 1
-			end
-			local word = input:sub(start, i - 1)
-			local type = keywords[word] and TokenType.Keyword
-				or TokenType.Ident
-			self.i = i
-			return { type = type, value = word }
-		elseif c == '"' then
-			self.last_pos = i
-			i = i + 1
-			local start = i
-			while i <= len and input:sub(i, i) ~= '"' do
-				i = i + 1
-			end
-			local str = input:sub(start, i - 1)
-			self.i = i + 1
-			return { type = TokenType.String, value = str }
-
-		-- char literal: 'c' or an escape like '\n'; value is the byte code
-		elseif c == "'" then
-			self.last_pos = i
-			local ch = input:sub(i + 1, i + 1)
-			local code, after
-			if ch == "\\" then
-				local esc = input:sub(i + 2, i + 2)
-				local map = {
-					n = 10,
-					t = 9,
-					r = 13,
-					["0"] = 0,
-					["\\"] = 92,
-					["'"] = 39,
-				}
-				code = map[esc] or string.byte(esc)
-				after = i + 3 -- '\x
-			else
-				code = string.byte(ch)
-				after = i + 2 -- 'x
-			end
-			if input:sub(after, after) ~= "'" then
-				local l, c = self:linecol()
-				error(
-					string.format(
-						"%d:%d: unterminated char literal",
-						l,
-						c
-					),
-					0
-				)
-			end
-			self.i = after + 1
-			return { type = TokenType.Number, value = code }
+			i = self:skip_block_comment(i)
 		else
-			self.last_pos = i
-			local sym = c
-			local n = input:sub(i + 1, i + 1)
-			if
-				(c == "=" or c == "!" or c == "<" or c == ">")
-				and n == "="
-			then
-				sym = c .. "="
-				i = i + 1
-			elseif
-				(c == "+" or c == "-" or c == "*" or c == "/" or c == "%")
-				and n == "="
-			then
-				sym = c .. "="
-				i = i + 1 -- compound assignment
-			elseif c == "+" and n == "+" then
-				sym = "++"
-				i = i + 1
-			elseif c == "&" and n == "&" then
-				sym = "&&"
-				i = i + 1
-			elseif c == "|" and n == "|" then
-				sym = "||"
-				i = i + 1
-			elseif c == "<" and n == "<" then
-				sym = "<<"
-				i = i + 1
-			elseif c == ">" and n == ">" then
-				sym = ">>"
-				i = i + 1
-			end
-			self.i = i + 1
-			return { type = TokenType.Symbol, value = sym }
+			self.i = i -- scanners pick up from here
+			if is_digit(c) then return self:scan_number() end
+			if is_alpha(c) then return self:scan_ident() end
+			if c == '"' then return self:scan_string() end
+			if c == "'" then return self:scan_char() end
+			return self:scan_symbol()
 		end
 	end
-
 	self.i = i
 	return { type = TokenType.EOF, value = "" }
+end
+
+-- advance past a `//` line comment; returns the index at end-of-line
+function Tokenizer:skip_line_comment(i)
+	local input, len = self.input, self.len
+	i = i + 2
+	while i <= len and input:sub(i, i) ~= "\n" do
+		i = i + 1
+	end
+	return i
+end
+
+-- advance past a `/* ... */` block comment; returns the index after `*/`
+function Tokenizer:skip_block_comment(i)
+	local input, len = self.input, self.len
+	i = i + 2
+	while
+		i <= len
+		and not (input:sub(i, i) == "*" and input:sub(i + 1, i + 1) == "/")
+	do
+		i = i + 1
+	end
+	return i + 2
+end
+
+function Tokenizer:scan_number()
+	local input, len = self.input, self.len
+	local i = self.i
+	self.last_pos = i
+	local start = i
+	while i <= len and is_digit(input:sub(i, i)) do
+		i = i + 1
+	end
+	-- fractional part: a '.' then at least one digit makes it a float. Tag it:
+	-- under Lua 5.1/LuaJIT every number is a double, so the value alone cannot
+	-- tell int from float; the backend needs this for typing.
+	local isFloat = false
+	if input:sub(i, i) == "." and is_digit(input:sub(i + 1, i + 1)) then
+		isFloat = true
+		i = i + 1
+		while i <= len and is_digit(input:sub(i, i)) do
+			i = i + 1
+		end
+	end
+	self.i = i
+	return {
+		type = TokenType.Number,
+		value = tonumber(input:sub(start, i - 1)),
+		isFloat = isFloat,
+	}
+end
+
+function Tokenizer:scan_ident()
+	local input, len = self.input, self.len
+	local i = self.i
+	self.last_pos = i
+	local start = i
+	while i <= len and input:sub(i, i):match("[%w_]") do
+		i = i + 1
+	end
+	local word = input:sub(start, i - 1)
+	self.i = i
+	local kind = keywords[word] and TokenType.Keyword or TokenType.Ident
+	return { type = kind, value = word }
+end
+
+function Tokenizer:scan_string()
+	local input, len = self.input, self.len
+	local i = self.i
+	self.last_pos = i
+	i = i + 1
+	local start = i
+	while i <= len and input:sub(i, i) ~= '"' do
+		i = i + 1
+	end
+	self.i = i + 1
+	return { type = TokenType.String, value = input:sub(start, i - 1) }
+end
+
+-- char literal: 'c' or an escape like '\n'; value is the byte code
+function Tokenizer:scan_char()
+	local input = self.input
+	local i = self.i
+	self.last_pos = i
+	local ch = input:sub(i + 1, i + 1)
+	local code, after
+	if ch == "\\" then
+		local esc = input:sub(i + 2, i + 2)
+		local map = { n = 10, t = 9, r = 13, ["0"] = 0, ["\\"] = 92, ["'"] = 39 }
+		code = map[esc] or string.byte(esc)
+		after = i + 3 -- '\x
+	else
+		code = string.byte(ch)
+		after = i + 2 -- 'x
+	end
+	if input:sub(after, after) ~= "'" then
+		local l, col = self:linecol()
+		error(string.format("%d:%d: unterminated char literal", l, col), 0)
+	end
+	self.i = after + 1
+	return { type = TokenType.Number, value = code }
+end
+
+-- one- or two-char operator/punctuation token (==, +=, <<, &&, ...)
+function Tokenizer:scan_symbol()
+	local input = self.input
+	local i = self.i
+	self.last_pos = i
+	local c = input:sub(i, i)
+	local n = input:sub(i + 1, i + 1)
+	local sym = c
+	if (c == "=" or c == "!" or c == "<" or c == ">") and n == "=" then
+		sym = c .. "="
+		i = i + 1
+	elseif
+		(c == "+" or c == "-" or c == "*" or c == "/" or c == "%")
+		and n == "="
+	then
+		sym = c .. "=" -- compound assignment
+		i = i + 1
+	elseif c == "+" and n == "+" then
+		sym, i = "++", i + 1
+	elseif c == "&" and n == "&" then
+		sym, i = "&&", i + 1
+	elseif c == "|" and n == "|" then
+		sym, i = "||", i + 1
+	elseif c == "<" and n == "<" then
+		sym, i = "<<", i + 1
+	elseif c == ">" and n == ">" then
+		sym, i = ">>", i + 1
+	end
+	self.i = i + 1
+	return { type = TokenType.Symbol, value = sym }
 end
 
 function Tokenizer:peek()
