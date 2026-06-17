@@ -14,9 +14,9 @@ Nova is a modern simplified C++ built on Lua, designed for clarity and modern ex
 
 ## 📃 Comments
 
-```nova
+```lua
 -- Singe
-// line comment
+// line comments
 
 /*
   Multi-line
