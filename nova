@@ -1,29 +1,19 @@
 #!/usr/bin/env lua5.4
--- Nova runner: parse a .nova file, lower it to pseudo-IR, execute it.
+-- Nova runner: parse a .nova file, transpile it to Lua, execute it.
 -- Usage: ./nova <file.nova> [--entry name] [int args...]
 --   --entry  function to call (default: main)
 --   int args are passed to that function
 --
--- Runs under lua5.4 to match the luarocks rock tree (C rocks like cjson are
--- built per Lua version); pure-Nova programs run under any 5.3+ interpreter.
+-- `import`ing a luarocks package uses Lua's normal module search, so set up
+-- your rock tree the usual way (e.g. `eval "$(luarocks path)"`). C rocks are
+-- built per Lua version, so run under the Lua the rock was built for.
 
 local here = arg[0]:match("^(.*)/[^/]*$") or "."
 package.path = here .. "/lang/?.lua;" .. here .. "/codegen/?.lua;"
             .. package.path
 
--- make luarocks-installed modules importable without any env vars: add the
--- user rock tree for the running Lua version to the search paths
-local home = os.getenv("HOME")
-local ver = _VERSION:match("(%d+%.%d+)")
-if home and ver then
-  package.path = home .. "/.luarocks/share/lua/" .. ver .. "/?.lua;"
-    .. home .. "/.luarocks/share/lua/" .. ver .. "/?/init.lua;" .. package.path
-  package.cpath = home .. "/.luarocks/lib/lua/" .. ver .. "/?.so;" .. package.cpath
-end
-
 local Parser = require("parser")
-local Codegen = require("codegen")
-local VM = require("vm")
+local Avon = require("avon")
 
 local file, entry, callargs = nil, "main", {}
 local i = 1
@@ -53,10 +43,9 @@ end
 local src = fh:read("*a")
 fh:close()
 
--- Nova has no try/catch of its own; it does not need one. The host (Lua)
--- already provides structured error handling via pcall, so the whole
--- parse -> codegen -> run pipeline runs inside one, and any error() raised
--- in the toolchain or a missing entry is caught and reported cleanly.
+-- The whole parse -> transpile -> run pipeline runs inside one pcall, so any
+-- error() raised in the toolchain, a missing entry, or an uncaught Nova throw
+-- is caught and reported cleanly.
 local ok, result = pcall(function()
   local ast = Parser:new(src):parse()
 
@@ -73,23 +62,38 @@ local ok, result = pcall(function()
       entry, #names > 0 and table.concat(names, ", ") or "none"))
   end
 
-  local cg = Codegen.new()
-  local insns = cg:generate(ast.body)
-  local vm = VM.new(insns, cg.strings)
-
-  -- `import foo` in the source exposes that module's functions to Nova as
-  -- foo.fn(...). A stdlib table (math) is taken from the globals; anything
-  -- else is require()d, so luarocks packages work the same way.
+  -- pad missing entry args to the entry's arity with 0: avon may drop a
+  -- parameter's default when every internal call site supplies it, so the
+  -- runner keeps the "missing args -> 0" contract for the entry itself.
   for _, node in ipairs(ast.body) do
-    if node.type == "import" then
-      local m = _G[node.module] or require(node.module)
-      for k, v in pairs(m) do
-        if type(v) == "function" then vm:register(node.module .. "." .. k, v) end
-      end
+    if node.type == "function" and node.name == entry then
+      for j = #callargs + 1, #node.params do callargs[j] = 0 end
+      break
     end
   end
 
-  return vm:run(entry, callargs)
+  -- host builtins exposed to Nova code, mirroring the old VM stdlib. The
+  -- transpiled Lua calls them by global name, so they live in the chunk's
+  -- environment. `import foo` binds the module table as the global `foo`
+  -- (so foo.fn(...) is plain Lua indexing); `import foo as f` binds it as f.
+  -- math is taken from globals, anything else is require()d, so luarocks
+  -- packages work the same way.
+  local env = {pow = function(a, b) return a ^ b end}
+  env.print = function(...) print(...) return 0 end
+  for _, name in ipairs({"sqrt", "floor", "ceil", "sin", "cos", "log"}) do
+    env[name] = math[name]
+  end
+  for _, node in ipairs(ast.body) do
+    if node.type == "import" then
+      env[node.alias or node.module] =
+        _G[node.module] or require(node.module)
+    end
+  end
+
+  -- transpile the AST to Lua and load it; the entry is a real Lua function
+  local unpack = table.unpack or unpack -- 5.2+ vs 5.1/LuaJIT
+  local mods = Avon.load(ast.body, env)
+  return {mods[entry](unpack(callargs))}
 end)
 
 if not ok then

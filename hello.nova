@@ -4,8 +4,17 @@ import math // exposes math.sqrt etc. (a luarocks package imports the same)
 
 typedef int myint;
 
-struct Vec3 {
-  float x, y, z;
+// enums name integer constants from 0 (X=0, Y=1, Z=2); Vec3 tags an axis
+enum Vec3 { X, Y, Z }
+
+// switch over an enum value; no fall-through, no break needed
+fn int axisweight(int axis) {
+  switch axis {
+    case X: return 100;
+    case Y: return 10;
+    case Z: return 1;
+    default: return 0;
+  }
 }
 
 // braces optional on a single-statement function body
@@ -138,5 +147,5 @@ fn int main() {
   int q, r = divmod(17, 5); // destructures both results: q=3, r=2
   return sum(5) + abs(id(-3)) + sign(-42)
        + max(3, 9) + oddbit(5) + grade(2) + q + r + circle(2) + hyp(3, 4)
-       + oddsum(20) + safe(-5)
+       + oddsum(20) + safe(-5) + axisweight(Y)
 }

@@ -2,8 +2,9 @@
 
 > Everything in this readme is mostly functional.
 
-At the foundation is Nýr, a portable micro-IR (µIR) designed for efficient and flexible code generation. Built on top of Nýr is Nova, a new minimal high-level language that embraces modern programming principles. Together, Nýr and Nova represent a bold step toward a leaner, more elegant future in software development.
-Nava isn't just a language it's a philosophy: that the complexity of modern systems is not a necessity but a choice. Nava chooses minimalism, portability and readability.
+Welcome to `avon` a transpiler, it takes `.nova` code as input passes it through a `parser` and emits `lua` compiled byte-code directly.
+
+**Requires** Lua 5.3/5.4  or LuaJIT (not vanilla 5.1, the output uses `goto`). Run it under LuaJIT for ~5–14× on hot code: `luajit ./nova prog.nova`. Note: under LuaJIT (doubles only) integers are exact to 2⁵³ and bitwise is 32-bit; Lua 5.4 gives full 64-bit.
 
 # 🛰️ Nova Language Syntax Sheet
 
@@ -30,7 +31,7 @@ Nova is a modern simplified C++ built on Lua, designed for clarity and modern ex
 ```
 fn       if       else     for      return
 break    continue switch   case     default
-enum     typedef  struct
+enum     typedef
 try      catch    except   throw
 ```
 
@@ -191,17 +192,19 @@ fn main() {
 `import <module>` exposes a host module's functions to Nova as
 `module.fn(...)`. A stdlib table works out of the box:
 
+`import <module> as <alias>` binds the same module under a different prefix:
+
 ```nova
-import math
+import math as m
 
 fn int hypot(int a, int b) {
-  return math.sqrt(a * a + b * b)
+  return m.sqrt(a * a + b * b)
 }
 ```
 
-A `luarocks` package is no different -- install it, then `import` it. The
-runner adds the user rock tree to Lua's search path, so no environment
-setup is needed (run under the Lua version the rock was built for):
+A `luarocks` package is no different -- install it, put its rock tree on
+Lua's path the usual way (`eval "$(luarocks path)"`), then `import` it (run
+under the Lua version the rock was built for):
 
 ```nova
 import cjson

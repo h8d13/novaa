@@ -51,7 +51,7 @@ local Precedence = {
 
 local keywords = {
   ["fn"]=true, ["if"]=true, ["else"]=true, ["for"]=true, ["return"]=true,
-  ["typedef"]=true, ["struct"]=true,
+  ["typedef"]=true,
   ["switch"]=true, ["case"]=true, ["default"]=true, ["enum"]=true,
   ["break"]=true, ["continue"]=true,
   ["try"]=true, ["catch"]=true, ["except"]=true, ["throw"]=true,
@@ -75,6 +75,12 @@ function Tokenizer:next()
       i = i + 2
       while i <= len and input:sub(i, i) ~= "\n" do i = i + 1 end
 
+    -- dash line comment: `--` is a comment (Lua/README style), never a
+    -- decrement operator, so there is no `--x`. `++` stays as increment.
+    elseif c == "-" and input:sub(i+1, i+1) == "-" then
+      i = i + 2
+      while i <= len and input:sub(i, i) ~= "\n" do i = i + 1 end
+
     -- block comment
     elseif c == "/" and input:sub(i+1, i+1) == "*" then
       i = i + 2
@@ -86,13 +92,18 @@ function Tokenizer:next()
     elseif is_digit(c) then
       local start = i
       while i <= len and is_digit(input:sub(i, i)) do i = i + 1 end
-      -- fractional part: a '.' followed by at least one digit makes it a float
+      -- fractional part: a '.' followed by at least one digit makes it a float.
+      -- Tag it: under Lua 5.1/LuaJIT every number is a double, so the value
+      -- alone cannot tell int from float; the backend needs this for typing.
+      local isFloat = false
       if input:sub(i, i) == "." and is_digit(input:sub(i+1, i+1)) then
+        isFloat = true
         i = i + 1
         while i <= len and is_digit(input:sub(i, i)) do i = i + 1 end
       end
       self.i = i
-      return {type=TokenType.Number, value=tonumber(input:sub(start, i-1))}
+      return {type=TokenType.Number, value=tonumber(input:sub(start, i-1)),
+              isFloat=isFloat}
 
     elseif is_alpha(c) then
       local start = i
@@ -140,8 +151,6 @@ function Tokenizer:next()
         sym = c .. '='; i = i + 1 -- compound assignment
       elseif c == '+' and n == '+' then
         sym = '++'; i = i + 1
-      elseif c == '-' and n == '-' then
-        sym = '--'; i = i + 1
       elseif c == '&' and n == '&' then
         sym = '&&'; i = i + 1
       elseif c == '|' and n == '|' then
@@ -206,7 +215,7 @@ Parser = Object:new()
   -- Null denotation (prefix, literals)
   function Parser:nud(tok)
     if tok.type == TokenType.Number or tok.type == TokenType.String then
-      return {type="literal", value=tok.value}
+      return {type="literal", value=tok.value, isFloat=tok.isFloat}
     elseif tok.type == TokenType.Ident then
       if tok.value == "true" then return {type="literal", value=1} end
       if tok.value == "false" then return {type="literal", value=0} end
@@ -230,12 +239,12 @@ Parser = Object:new()
     elseif tok.value == "!" or tok.value == "~" then
       local right = self:parse_expression(Precedence["*"]) -- tight prefix bind
       return {type="unary", op=tok.value, right=right}
-    elseif tok.value == "++" or tok.value == "--" then
-      -- prefix ++/--: desugar `++x` to `x = x + 1`
+    elseif tok.value == "++" then
+      -- prefix ++: desugar `++x` to `x = x + 1`. (`--` is a comment, not a
+      -- decrement; use `x -= 1` to subtract.)
       local target = self:parse_expression(Precedence["*"])
-      local bop = tok.value == "++" and "+" or "-"
       return {type="binary", op="=", left=target,
-              right={type="binary", op=bop, left=target,
+              right={type="binary", op="+", left=target,
                      right={type="literal", value=1}}}
     end
     error("Unexpected token: " .. tok.value)
@@ -316,8 +325,6 @@ Parser = Object:new()
       return self:parse_for()
     elseif tok.type == TokenType.Keyword and tok.value == "typedef" then
       return self:parse_typedef()
-    elseif tok.type == TokenType.Keyword and tok.value == "struct" then
-      return self:parse_struct()
     elseif tok.type == TokenType.Keyword and tok.value == "switch" then
       return self:parse_switch()
     elseif tok.type == TokenType.Keyword and tok.value == "enum" then
@@ -335,7 +342,15 @@ Parser = Object:new()
       return {type="throw", value=self:parse_expression()}
     elseif tok.type == TokenType.Keyword and tok.value == "import" then
       self:next()
-      return {type="import", module=self:expect(TokenType.Ident).value}
+      local module = self:expect(TokenType.Ident).value
+      -- optional `as <alias>`: bind the module under a different prefix.
+      -- `as` is contextual (a plain ident), so it stays usable as a name.
+      local alias = module
+      if self:peek().value == "as" then
+        self:next()
+        alias = self:expect(TokenType.Ident).value
+      end
+      return {type="import", module=module, alias=alias}
     elseif tok.type == TokenType.Keyword and tok.value == "return" then
       self:next()
       local values = {self:parse_expression()}
@@ -434,28 +449,6 @@ Parser = Object:new()
     return body
   end
 
-  function Parser:parse_struct()
-    self:expect("struct")
-    local name = self:expect(TokenType.Ident).value
-    self:expect("{")
-
-    local fields = {}
-    while self:peek().value ~= "}" do
-      local field_type = self:parse_type()
-
-    -- Parse multiple field names separated by commas
-      repeat
-        local field_name = self:expect(TokenType.Ident).value
-        table.insert(fields, {type=field_type, name=field_name})
-      until self:peek().value ~= "," or not self:next()
-      self:expect(";")
-    end
-
-    self:expect("}")
-
-    return {type = "struct",name=name, fields=fields}
-  end
-
   function Parser:parse_type()
     local base = self:expect(TokenType.Ident).value
     if self:peek().value == "[" then
@@ -475,29 +468,28 @@ Parser = Object:new()
     return {type="typedef",alias=alias,base=base}
   end
 
-  function Parser:parse_declaration()
-    -- Parse the common type for all vars
+  -- Parse `T a, b = expr, ...` into a list of decl nodes, sharing one type.
+  -- Does not consume the terminating ';' so a for-init can reuse it.
+  function Parser:parse_decl_list()
     local var_type = self:parse_type()
     local decls = {}
-
     repeat
-      -- Parse variable name
       local var_name = self:expect(TokenType.Ident).value
-
-      -- Optional initializer for this variable
       local init = nil
       if self:peek().value == "=" then
         self:next() -- consume '='
         init = self:parse_expression()
       end
-
-      table.insert(decls, {type = "decl", varType = var_type, name = var_name, value = init})
+      table.insert(decls, {type = "decl", varType = var_type,
+                           name = var_name, value = init})
     until self:peek().value ~= "," or not self:next()
-
-    self:expect(";")
-
-    -- Return all declarations as a block or list
     return decls
+  end
+
+  function Parser:parse_declaration()
+    local decls = self:parse_decl_list()
+    self:expect(";")
+    return decls -- a list (no .type); gen_statement walks / destructures it
   end
 
   function Parser:parse_function()
@@ -544,21 +536,31 @@ Parser = Object:new()
     return {type="if", cond=cond, thenBranch=then_branch, elseBranch=else_branch}
   end
 
+  -- Two forms share the `for` keyword:
+  --   C-style:   for init; cond; update { body }
+  --   iterator:  for T name = expr { body }   (no `;` -- a `{` follows init)
+  -- The init is parsed without its trailing ';'; the token after it (`;` vs
+  -- `{`) selects the form.
   function Parser:parse_for()
     self:expect("for")
 
-    -- Parse init statement. A declaration init already consumes its own
-    -- terminating ';' (and returns a decl list with no .type); an expression
-    -- init does not, so only expect ';' in that case.
-    local init = self:parse_statement()
-    if init.type then self:expect(";") end
+    local init
+    if self:peek().type == TokenType.Ident and self:looks_like_decl() then
+      init = self:parse_decl_list() -- decl list, no ';' consumed
+    else
+      init = self:parse_expression()
+    end
 
-    -- Parse condition
+    -- iterator form: re-evaluates `expr` each pass, binds it to the loop
+    -- variable, runs the body while the value is non-zero (0 = exhausted)
+    if self:peek().value == "{" then
+      return {type="forin", init=init, body=self:parse_block()}
+    end
+
+    self:expect(";")
     local cond = self:parse_expression()
     self:expect(";")
-    -- Parse update expression (treat as a statement, e.g., assignment)
-    local update = self:parse_statement()
-    -- Parse body
+    local update = self:parse_statement() -- e.g. an assignment
     local body = self:parse_block()
     return {type="for", init=init, cond=cond, update=update, body=body}
   end
