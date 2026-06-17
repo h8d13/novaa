@@ -9,7 +9,7 @@ Run it under LuaJIT for ~5–14× on hot code: `luajit ./nova prog.nova`.
 
 > Note: under LuaJIT (doubles only) integers are exact to 2⁵³ and bitwise is 32-bit; Lua 5.4 gives full 64-bit.
 
-# 🛰️ NAvon Language Syntax Sheet
+# 🛰️  Avon
 
 `avon` is a modern simplified C++ built on Lua, designed for clarity and modern expression.
 It uses `fn` for function declarations, first class multiple return times and omits parentheses for conditional statements, and optional curly braces for single expression functions, too.
