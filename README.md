@@ -23,8 +23,8 @@ Mostly tested only on **Unix** systems.
 // Single line comments
 
 /*
-  Multi-line
-  comment
+Multi-line
+comment
 */
 ```
 
@@ -34,7 +34,8 @@ Mostly tested only on **Unix** systems.
 
 ```
 fn       if       else     for      return
-break    continue switch   case     default
+break    continue
+switch   case     default
 enum     typedef
 try      catch    except   throw
 ```
@@ -70,7 +71,7 @@ null        // null value
 
 ```cpp
 fn main() {
-  print("Hello, " + name)
+	print("Hello, " + name)
 }
 ```
 
@@ -85,7 +86,7 @@ natively supports multiple return values just likr arguments, too
 
 ```cpp
 fn int, int test(int x, int y)
-  return x, y
+	return x, y
 
 int v, error = test(x, y)
 ```
@@ -98,9 +99,9 @@ int v, error = test(x, y)
 
 ```cpp
 if x > 0 {
-  print("Positive")
+	print("Positive")
 } else {
-  print("Negative or zero")
+	print("Negative or zero")
 }
 ```
 
@@ -108,7 +109,7 @@ if x > 0 {
 
 ```cpp
 for int i = 0; i < 10; ++i {
-  print(i)
+	print(i)
 }
 ```
 
@@ -116,7 +117,7 @@ for int i = 0; i < 10; ++i {
 
 ```cpp
 for string s = it.next() {
-  print(i)
+	print(i)
 }
 ```
 
@@ -128,9 +129,9 @@ for string s = it.next() {
 
 ```cpp
 enum Color {
-  Red,
-  Green,
-  Blue,
+	Red,
+	Green,
+	Blue,
 }
 ```
 
@@ -157,12 +158,12 @@ int w = row()[0];
 
 ```cpp
 switch color {
-  case Red:
-    print("Stop")
-  case Green:
-    print("Go")
-  default:
-    print("Wait")
+	case Red:
+    		print("Stop")
+  	case Green:
+    		print("Go")
+  	default:
+    		print("Wait")
 }
 ```
 
@@ -177,17 +178,17 @@ spelled `try`/`except`).
 
 ```cpp
 fn risky()
-  throw "Something went wrong"
+	throw "Something went wrong"
 ```
 
 ### Catching Exceptions
 
 ```cpp
 fn main() {
-  try
-    risky()
-  catch err
-    print("Error was: " + err)
+	try
+    		risky()
+  	catch err
+    		print("Error was: " + err)
 }
 ```
 
@@ -202,7 +203,7 @@ fn main() {
 import math as m
 
 fn int hypot(int a, int b) {
-  return m.sqrt(a * a + b * b)
+	return m.sqrt(a * a + b * b)
 }
 ```
 
