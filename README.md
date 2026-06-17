@@ -156,9 +156,9 @@ switch color {
 	case Red:
 		print("Stop")
   	case Green:
-    		print("Go")
+		print("Go")
   	default:
-    		print("Wait")
+		print("Wait")
 }
 ```
 
