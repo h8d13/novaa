@@ -10,6 +10,7 @@ local tests = {
 	"tests/eval_literals.lua",
 	"tests/eval_imports.lua",
 	"tests/eval_unsupported.lua",
+	"tests/eval_pragmas.lua",
 }
 
 local lua = arg[-1] or "lua5.4"

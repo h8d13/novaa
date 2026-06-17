@@ -63,6 +63,19 @@ identifier). Targets are not checked against any symbol table, so a typo in a
 function target surfaces as a runtime nil-call, not a parse error. An alias
 may not be an existing keyword.
 
+The marker itself is rebindable. `<marker>pragma = <punct>` (or the short
+`<marker>pg = <punct>`) switches it for the lines that follow, so you can trade
+`__` for a terser symbol. `__` is the irreducible root (something has to
+bootstrap the rest).
+
+```cpp
+__pragma = $$
+$$fn     = f
+$$return = r
+
+f int main() { r 42 }
+```
+
 Scope is the file (aliases do not leak across `import`). To share aliases
 project-wide, put the directives in a `.novapre` file at the entry
 directory; every compiled file (entry and imports) inherits them. For

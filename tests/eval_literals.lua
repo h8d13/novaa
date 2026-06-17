@@ -33,6 +33,22 @@ do
   ]])
 	if out[1] ~= "n=42" then error("string+int: got " .. tostring(out[1])) end
 end
+-- concat of str *variables* (no literal present): needs string-type tracking,
+-- not the old literal-spotting proxy
+do
+	local _, out = E.run([[
+    fn int main() { str a = "foo"; str b = "bar"; print(a + b); return 0 }
+  ]])
+	if out[1] ~= "foobar" then error("str var concat: got " .. tostring(out[1])) end
+end
+-- accumulation loop and a str-returning function compose without a literal
+do
+	local _, out = E.run([[
+    fn str rep(str s) { str r = ""; r = r + s; r = r + s; return r }
+    fn int main() { str x = "ab"; print(rep(x) + "!"); return 0 }
+  ]])
+	if out[1] ~= "abab!" then error("str fn compose: got " .. tostring(out[1])) end
+end
 
 -- both comment forms are skipped by the lexer: slash line and block
 eq(

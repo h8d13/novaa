@@ -88,16 +88,36 @@ local keywords = {
 	["import"] = true,
 }
 
--- `__<target> = <alias>` lines register a per-file word rewrite (`alias` ->
--- `target`) and are blanked out (not deleted) so downstream byte offsets and
+-- escape Lua pattern magic so an arbitrary marker can be spliced into a pattern
+local function pat_escape(s) return (s:gsub("(%W)", "%%%1")) end
+
+-- `<marker><target> = <alias>` lines register a per-file word rewrite (`alias`
+-- -> `target`) and are blanked out (not deleted) so downstream byte offsets and
 -- line:col reporting stay accurate. Runs once at construction, before scanning.
 -- `target` may be a keyword (rewrite classifies as that keyword) or any other
 -- identifier such as a host/user function name (rewrite stays an identifier);
 -- non-keyword targets are unchecked, so a typo surfaces as a runtime nil-call.
+--
+-- The marker starts as `__` and is itself rebindable: `<marker>pragma = <punct>`
+-- switches the marker for the lines that follow (`__pragma = $$` then `$$fn =
+-- f`). `__` is the irreducible root -- something has to bootstrap the rest.
+-- A directive may carry a trailing `// comment`; it is matched against the code
+-- part but the whole line (comment included) is blanked.
 function Tokenizer:extract_pragmas(input)
+	local marker = "__"
 	return (
 		input:gsub("[^\n]*", function(line)
-			local target, alias = line:match("^%s*__(%w+)%s*=%s*(%w+)%s*$")
+			local code = line:gsub("%s*//.*$", "") -- strip trailing comment
+			local m = pat_escape(marker)
+			-- meta-directive: `pragma`/`pg` rebinds the marker to a run of punct
+			local verb, newmarker =
+				code:match("^%s*" .. m .. "(%w+)%s*=%s*(%p+)%s*$")
+			if verb == "pragma" or verb == "pg" then
+				marker = newmarker
+				return ""
+			end
+			local target, alias =
+				code:match("^%s*" .. m .. "(%w+)%s*=%s*(%w+)%s*$")
 			if not target then return line end
 			if keywords[alias] then
 				error("alias shadows keyword: " .. alias, 0)

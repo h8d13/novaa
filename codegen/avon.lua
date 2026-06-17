@@ -9,7 +9,7 @@
 --   - int `/` and `%` truncate toward zero   -> __idiv / __imod, chosen at
 --     compile time from a static int/float type (is_int); Lua 5.1/LuaJIT has
 --     no integer subtype, so this cannot be decided at run time
---   - `+` concatenates if either side is a string literal
+--   - `+` concatenates if either side has string type (is_str)
 --   - array elements default-read as 0       -> __ZERO metatable
 --
 -- Targets both Lua 5.3/5.4 and LuaJIT (Lua 5.1 + the `bit` library), detected
@@ -27,8 +27,6 @@
 -- label counters) instead of capturing it as upvalues, so they live at file
 -- scope and each stays shallow rather than nesting inside one big compile().
 local Avon = {}
-
-local function is_strlit(n) return n.type == "literal" and type(n.value) == "string" end
 
 -- `int a, b = f()` destructures (mirror Codegen:is_destructure)
 local function is_destructure(decls)
@@ -55,7 +53,7 @@ local cmp = {
 
 -- mutually recursive emitters (E <-> E_binary <-> Econd, emit_stmt <-> block),
 -- forward-declared so the bodies below can reference each other.
-local E, E_binary, Econd, is_int, args_str
+local E, E_binary, Econd, is_int, is_str, args_str
 local emit_decl, emit_decl_list, emit_for_init, emit_assign, emit_for
 local emit_stmt, emit_switch, emit_try, block
 
@@ -68,14 +66,32 @@ local function newcont(cx)
 	return "__cont" .. cx.labelc
 end
 
--- a Nova type name is int unless it (after following typedefs) is `float`
-local function is_int_type(cx, name)
+-- resolve a type name through any typedef chain to its underlying builtin
+local function resolve_type(cx, name)
 	local seen = 0
 	while cx.typedefs[name] and seen < 16 do
 		name = cx.typedefs[name]
 		seen = seen + 1
 	end
-	return name ~= "float"
+	return name
+end
+
+-- `str`/`string` are the Nova string type; everything else is numeric
+local function is_str_type(cx, name)
+	name = resolve_type(cx, name)
+	return name == "str" or name == "string"
+end
+
+-- a Nova type name is int unless it resolves to `float` or a string type
+local function is_int_type(cx, name)
+	name = resolve_type(cx, name)
+	return name ~= "float" and name ~= "str" and name ~= "string"
+end
+
+-- the per-variable typeenv tag for a scalar type name: drives is_int/is_str
+local function scalar_tag(cx, name)
+	if is_str_type(cx, name) then return "str" end
+	return is_int_type(cx, name) and "int" or "float"
 end
 
 function args_str(cx, list)
@@ -162,10 +178,31 @@ function is_int(cx, node)
 		if op == "&" or op == "|" or op == "^" or op == "<<" or op == ">>" then
 			return true
 		end
-		if op == "+" and (is_strlit(node.left) or is_strlit(node.right)) then
+		if op == "+" and (is_str(cx, node.left) or is_str(cx, node.right)) then
 			return false -- string concatenation
 		end
 		return is_int(cx, node.left) and is_int(cx, node.right)
+	end
+	return false
+end
+
+-- is_str(node): does this expression have Nova string type? Drives `+`
+-- concatenation vs numeric add. String-ness propagates through `+` (so chained
+-- builds stay strings) and the two branches of a ternary; everything else
+-- (numbers, host field access, unknown calls) is treated as non-string.
+function is_str(cx, node)
+	local t = node.type
+	if t == "literal" then
+		return type(node.value) == "string"
+	elseif t == "identifier" then
+		return cx.typeenv[node.name] == "str"
+	elseif t == "call" then
+		return node.name ~= nil and cx.ret_str[node.name] == true
+	elseif t == "ternary" then
+		return is_str(cx, node.thenE) or is_str(cx, node.elseE)
+	elseif t == "binary" then
+		return node.op == "+"
+			and (is_str(cx, node.left) or is_str(cx, node.right))
 	end
 	return false
 end
@@ -215,7 +252,7 @@ function E_binary(cx, node)
 	end
 	local L, R = E(cx, node.left), E(cx, node.right)
 	if op == "+" then
-		if is_strlit(node.left) or is_strlit(node.right) then
+		if is_str(cx, node.left) or is_str(cx, node.right) then
 			return "(tostring(" .. L .. ") .. tostring(" .. R .. "))"
 		end
 		return "((" .. L .. ") + (" .. R .. "))"
@@ -265,12 +302,16 @@ function emit_decl(cx, d)
 			or "arr:float"
 		push(cx, "local " .. d.name .. " = setmetatable({}, __ZERO)")
 	else
-		cx.typeenv[d.name] = is_int_type(cx, d.varType and d.varType.name)
-				and "int"
-			or "float"
+		local tag = scalar_tag(cx, d.varType and d.varType.name)
+		cx.typeenv[d.name] = tag
+		-- uninitialized scalars zero-fill; an uninitialized string starts empty
+		local default = tag == "str" and '""' or "0"
 		push(
 			cx,
-			"local " .. d.name .. " = " .. (d.value and E(cx, d.value) or "0")
+			"local "
+				.. d.name
+				.. " = "
+				.. (d.value and E(cx, d.value) or default)
 		)
 	end
 end
@@ -623,7 +664,7 @@ local function emit_function(cx, n, min_args)
 	local ps = {}
 	for i, p in ipairs(n.params) do
 		ps[i] = p.name
-		cx.typeenv[p.name] = is_int_type(cx, p.type) and "int" or "float"
+		cx.typeenv[p.name] = scalar_tag(cx, p.type)
 	end
 	push(cx, "function " .. n.name .. "(" .. table.concat(ps, ", ") .. ")")
 	cx.ind = cx.ind + 1
@@ -696,6 +737,7 @@ function Avon.compile(body)
 		consts = {}, -- enum variant -> integer value
 		typedefs = {}, -- typedef alias -> base type name
 		ret_int = {}, -- user function name -> first return type is int?
+		ret_str = {}, -- user function name -> first return type is str?
 		typeenv = {}, -- per-function scalar types, reset before each function
 		labelc = 0,
 		subjc = 0,
@@ -712,8 +754,9 @@ function Avon.compile(body)
 	end
 	for _, n in ipairs(body) do
 		if n.type == "function" then
-			cx.ret_int[n.name] =
-				is_int_type(cx, n.returnTypes and n.returnTypes[1])
+			local rt = n.returnTypes and n.returnTypes[1]
+			cx.ret_int[n.name] = is_int_type(cx, rt)
+			cx.ret_str[n.name] = is_str_type(cx, rt)
 		end
 	end
 
