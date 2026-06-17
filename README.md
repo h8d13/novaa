@@ -227,3 +227,7 @@ import a.b.c as g   // root/a/b/c.nova    -> g.fn(...)
 ```
 
 > A minimal language earns its minimalism by not rebuilding what the host already does well.
+
+This project was originally developped by @rxrbln but had very different goals (codegen, RISC-V).
+But this idea was basically re-inventing Lua's contributors' work, which was impractical.
+I thought the idea was elegant and generalized it for **x86_64 target only**, straight `load()` to Lua.
