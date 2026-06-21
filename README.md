@@ -77,6 +77,16 @@ $$return = r
 f int main() { r 42 }
 ```
 
+Several directives may also share a line, `;`-separated (the spaces around `=`
+are optional). A line is treated as directives only when *every* segment is one,
+so ordinary code is never affected; the marker may even be rebound mid-line.
+
+```cpp
+__pragma = @; @fn = f; @return = r
+
+f int main() { r 42 }
+```
+
 Scope is the file (aliases do not leak across `import`). To share aliases
 project-wide, put the directives in a `.novapre` file at the entry
 directory; every compiled file (entry and imports) inherits them. For

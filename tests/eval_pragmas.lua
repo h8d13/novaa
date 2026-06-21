@@ -76,6 +76,32 @@ eq(
 	"trailing comment on directives"
 )
 
+-- several directives share one line, `;`-separated (spaces optional)
+eq("__fn = f; __return = r\nf int main() { r 8 }", 8, "two directives, one line")
+eq("__fn=f;__return=r\nf int main(){r 6}", 6, "semicolon directives, no spaces")
+
+-- the marker can be rebound mid-line; later segments use the new marker
+eq(
+	"__pragma = @; @fn = f; @return = r\nf int main() { r 5 }",
+	5,
+	"rebind marker then alias on the same line"
+)
+
+-- a trailing comment still applies to a multi-directive line
+eq(
+	"__fn = f; __return = r  // both at once\nf int main() { r 4 }",
+	4,
+	"trailing comment on a multi-directive line"
+)
+
+-- an ordinary statement also contains `;` and must never be mistaken for a
+-- directive line: this compiles and runs as code
+eq(
+	"fn int main() { int a = 1; int b = 2; return a + b }",
+	3,
+	"code line with semicolons is left untouched"
+)
+
 -- guard survives a rebound marker: an alias may not be an existing keyword
 if not E.fails([[
   __pragma = $$

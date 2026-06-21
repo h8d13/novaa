@@ -1,22 +1,5 @@
-__pragma = @
-@fn = f
-@return = r
-@if = Q
-@for = F
-@print = p
-@import = I
-@execute = e
-@random = q
-@input = X
-@read = Z
-@gsub = W
-@sub = Y
-@len = N
-@char = H
-@byte = B
-@str = T
-@typedef = u
-@match = K
+	__pragma=@;@fn=f;@return=r;@if=Q;@for=F;@print=p;@import=I;@execute=e;@random=q;@input=X;@read=Z
+			@gsub=W;@sub=Y;@len=N;@char=H;@byte=B;@str=T;@typedef=u;@match=K
 
                         u int i;I os as o;I io as j;I math as m;I string as s
                                f T dc(T c){r s.H(32+((s.B(c)+23)%95))}

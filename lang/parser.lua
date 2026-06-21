@@ -91,39 +91,71 @@ local keywords = {
 -- escape Lua pattern magic so an arbitrary marker can be spliced into a pattern
 local function pat_escape(s) return (s:gsub("(%W)", "%%%1")) end
 
--- `<marker><target> = <alias>` lines register a per-file word rewrite (`alias`
--- -> `target`) and are blanked out (not deleted) so downstream byte offsets and
--- line:col reporting stay accurate. Runs once at construction, before scanning.
--- `target` may be a keyword (rewrite classifies as that keyword) or any other
--- identifier such as a host/user function name (rewrite stays an identifier);
--- a non-keyword target rides the codegen unbound-name check, so a typo'd target
--- is a compile error, not a runtime nil-call.
+-- `<marker><target> = <alias>` directives register a per-file word rewrite
+-- (`alias` -> `target`). A directive line is blanked out (not deleted) so the
+-- line count -- and thus line:col reporting -- stays accurate. Runs once at
+-- construction, before scanning. `target` may be a keyword (rewrite classifies
+-- as that keyword) or any other identifier such as a host/user function name
+-- (rewrite stays an identifier); a non-keyword target rides the codegen
+-- unbound-name check, so a typo'd target is a compile error, not a nil-call.
 --
--- The marker starts as `__` and is itself rebindable: `<marker>pragma = <punct>`
--- switches the marker for the lines that follow (`__pragma = $$` then `$$fn =
--- f`). `__` is the irreducible root -- something has to bootstrap the rest.
--- A directive may carry a trailing `// comment`; it is matched against the code
--- part but the whole line (comment included) is blanked.
+-- Several directives may share a line, `;`-separated (`__fn = f; __return = r`);
+-- the line is blanked only when EVERY segment is a directive, so ordinary code
+-- (which also contains `;`) is never touched. The marker starts as `__` and is
+-- itself rebindable: `<marker>pragma = <punct>` switches it for what follows,
+-- on later lines or later segments of the same line (`__pragma = $$; $$fn = f`).
+-- `__` is the irreducible root -- something has to bootstrap the rest. A
+-- directive may carry a trailing `// comment`; it is stripped before matching.
+-- classify one trimmed segment against the active marker:
+--   "rebind", newmarker     -- `<marker>pragma|pg = <punct>`
+--   "alias",  target, alias -- `<marker>target = alias`
+--   nil                     -- anything else (i.e. ordinary code)
+local function classify_pragma(seg, marker)
+	local m = pat_escape(marker)
+	local verb, newmarker = seg:match("^" .. m .. "(%w+)%s*=%s*(%p+)$")
+	if verb == "pragma" or verb == "pg" then return "rebind", newmarker end
+	local target, alias = seg:match("^" .. m .. "(%w+)%s*=%s*(%w+)$")
+	if target then return "alias", target, alias end
+	return nil
+end
+
 function Tokenizer:extract_pragmas(input)
 	local marker = "__"
 	return (
 		input:gsub("[^\n]*", function(line)
 			local code = line:gsub("%s*//.*$", "") -- strip trailing comment
-			local m = pat_escape(marker)
-			-- meta-directive: `pragma`/`pg` rebinds the marker to a run of punct
-			local verb, newmarker =
-				code:match("^%s*" .. m .. "(%w+)%s*=%s*(%p+)%s*$")
-			if verb == "pragma" or verb == "pg" then
-				marker = newmarker
-				return ""
+			if code:match("^%s*$") then return line end -- blank / comment-only
+
+			-- a line may hold several `;`-separated directives. It is a directive
+			-- line only if EVERY segment is one; a single non-directive segment
+			-- means it is ordinary code, so leave the whole line untouched (and the
+			-- alias/marker effects gathered so far go uncommitted). The marker can
+			-- be rebound mid-line, so segments resolve left to right.
+			local m, pending = marker, {}
+			for seg in (code .. ";"):gmatch("([^;]*);") do
+				seg = seg:match("^%s*(.-)%s*$") -- trim
+				if seg ~= "" then
+					local kind, a, b = classify_pragma(seg, m)
+					if kind == "rebind" then
+						m = a
+					elseif kind == "alias" then
+						if keywords[b] then
+							error(
+								"alias shadows keyword: "
+									.. b,
+								0
+							)
+						end
+						pending[#pending + 1] = { b, a }
+					else
+						return line -- a code line: keep it verbatim
+					end
+				end
 			end
-			local target, alias =
-				code:match("^%s*" .. m .. "(%w+)%s*=%s*(%w+)%s*$")
-			if not target then return line end
-			if keywords[alias] then
-				error("alias shadows keyword: " .. alias, 0)
+			for _, p in ipairs(pending) do
+				self.aliases[p[1]] = p[2]
 			end
-			self.aliases[alias] = target
+			marker = m
 			return ""
 		end)
 	)
